@@ -9,29 +9,46 @@ WHY THIS FILE EXISTS:
   conductor — it calls them in order, makes the abstain decision, and
   assembles the final response. No HTTP logic here, no raw LLM calls here.
 
-EXECUTION FLOW (Phase 1):
-  1. Embed the question (via retrieval.embedder)
-  2. Search the vector store (via retrieval.vector_store)
-  3. Check if top score is above threshold
-     - Below threshold → abstain, return "not in notes" response
-  4. Build the prompt with evidence chunks
-  5. Call Vertex AI Gemini (via services.generation)
-  6. Parse and return AskResponse with citations
+EXECUTION FLOW (Module 5 — real, not a stub):
+  1. Embed the question and search the vector store
+     (CognaraPGVectorStore.similarity_search_with_score, Module 4)
+  2. Check if the top relevance score clears settings.RETRIEVAL_SCORE_THRESHOLD
+     - Below threshold or zero results → abstain, return "not in notes"
+  3. Build the prompt with evidence chunks and call Gemini
+     (app.services.generation, Module 5)
+  4. Assemble citations from the same chunks used for generation
+  5. Return AskResponse with answer, citations, confidence, real token usage
 
 INTERVIEW EXPLANATION:
-  "The service layer is where the RAG pipeline lives. Route → service →
-  retrieval + generation. This separation lets us swap out the vector
-  store or the LLM without touching the API layer."
-
-NOTE: Phase 1 stub — retrieval and generation are called but not yet
-implemented. They raise NotImplementedError until Phase 1 build begins.
+  "The service layer is where the RAG pipeline lives. Route -> service ->
+  retrieval + generation. This separation lets me swap the vector store
+  or the LLM without touching the API layer — I proved this during
+  development: CognaraPGVectorStore and the embeddings client both
+  changed mid-build (a vector store schema decision, an embeddings
+  deprecation migration) and ask_service.py's own code never had to
+  change, because it only ever calls the module-level interfaces."
 """
 
 from app.models.schemas import AskRequest, AskResponse, Citation
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.retrieval.embedder import get_embeddings
+from app.retrieval.vector_store import CognaraPGVectorStore
+from app.services import generation
 
 logger = get_logger(__name__)
+
+_store_instance: CognaraPGVectorStore | None = None
+
+
+def _get_store() -> CognaraPGVectorStore:
+    """Shared vector store instance (module-level singleton), same pattern
+    as get_embeddings() — avoids reconstructing the Cloud SQL connection
+    on every request."""
+    global _store_instance
+    if _store_instance is None:
+        _store_instance = CognaraPGVectorStore(embeddings=get_embeddings())
+    return _store_instance
 
 
 async def answer(request: AskRequest, request_id: str) -> AskResponse:
@@ -40,18 +57,23 @@ async def answer(request: AskRequest, request_id: str) -> AskResponse:
     Returns an AskResponse (with citations) or an abstained response.
     """
     # ── Step 1: Retrieve evidence ──────────────────────────────────────────
-    # TODO (Phase 1): replace stub with real retrieval
-    # chunks = await retrieval.search(
-    #     query=request.question,
-    #     top_k=settings.RETRIEVAL_TOP_K,
-    #     course_filter=request.course_filter,
-    #     chapter_filter=request.chapter_filter,
-    # )
-    chunks: list = []  # stub
+    store = _get_store()
+    results = store.similarity_search_with_score(
+        request.question,
+        k=settings.RETRIEVAL_TOP_K,
+        course_filter=request.course_filter,
+        chapter_filter=request.chapter_filter,
+    )
 
     # ── Step 2: Abstain if evidence is too weak ────────────────────────────
-    if not chunks or _top_score(chunks) < settings.RETRIEVAL_SCORE_THRESHOLD:
-        logger.info("abstaining_weak_evidence", request_id=request_id)
+    top_score = results[0][1] if results else 0.0
+    if not results or top_score < settings.RETRIEVAL_SCORE_THRESHOLD:
+        logger.info(
+            "abstaining_weak_evidence",
+            request_id=request_id,
+            top_score=top_score,
+            threshold=settings.RETRIEVAL_SCORE_THRESHOLD,
+        )
         return AskResponse(
             answer="The uploaded notes do not contain enough evidence to answer this question.",
             citations=[],
@@ -60,35 +82,24 @@ async def answer(request: AskRequest, request_id: str) -> AskResponse:
             abstain_reason="No sufficiently relevant chunks found in the loaded corpus.",
         )
 
-    # ── Step 3: Generate answer with evidence ──────────────────────────────
-    # TODO (Phase 1): replace stub with real generation call
-    # answer_text, tokens = await generation.generate(
-    #     question=request.question,
-    #     chunks=chunks,
-    # )
-    answer_text = "[Phase 1 stub — generation not yet implemented]"
-    tokens = 0
+    chunks = [doc for doc, _score in results]
 
-    # ── Step 4: Build citations from retrieved chunks ──────────────────────
-    citations = [_chunk_to_citation(c) for c in chunks]
+    # ── Step 3: Generate answer with evidence ──────────────────────────────
+    answer_text, tokens = await generation.generate(request.question, chunks)
+
+    # ── Step 4: Build citations from the SAME chunks used for generation ───
+    citations = [_result_to_citation(doc, score) for doc, score in results]
 
     return AskResponse(
         answer=answer_text,
         citations=citations,
-        confidence=_confidence_label(_top_score(chunks)),
+        confidence=_confidence_label(top_score),
         abstained=False,
         tokens_used=tokens,
     )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _top_score(chunks: list) -> float:
-    """Return the highest relevance score from the retrieved chunks."""
-    if not chunks:
-        return 0.0
-    return max(c.get("relevance_score", 0.0) for c in chunks)
-
 
 def _confidence_label(score: float) -> str:
     if score >= 0.70:
@@ -98,12 +109,13 @@ def _confidence_label(score: float) -> str:
     return "low"
 
 
-def _chunk_to_citation(chunk: dict) -> Citation:
+def _result_to_citation(doc, relevance_score: float) -> Citation:
+    meta = doc.metadata
     return Citation(
-        course_name=chunk.get("course_name", "unknown"),
-        chapter=chunk.get("chapter", "unknown"),
-        topic=chunk.get("topic"),
-        page_number=chunk.get("page_number", 0),
-        page_range=chunk.get("page_range"),
-        relevance_score=chunk.get("relevance_score", 0.0),
+        course_name=meta.get("course_name", "unknown"),
+        chapter=meta.get("chapter", "unknown"),
+        topic=meta.get("topic"),
+        page_number=meta.get("page_number", 0),
+        page_range=meta.get("page_range"),
+        relevance_score=relevance_score,
     )

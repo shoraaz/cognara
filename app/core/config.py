@@ -31,6 +31,20 @@ REAL BUG FOUND AND FIXED (Module 3 / init_db.py development):
   .env no longer takes down the whole app. This matters in practice
   because .env.example tends to get written slightly ahead of the code
   that consumes every variable in it.
+
+REAL BUG FOUND AND FIXED (Module 5 / generation.py development):
+  The default VERTEX_GENERATION_MODEL was "gemini-1.5-flash", set back
+  in Phase 0. Calling it in Module 5 failed with a real 404: "Publisher
+  model ... was not found". Checked against current Google documentation
+  (not assumed): Gemini 1.0 and 1.5 are FULLY SHUT DOWN — every request
+  to them now returns 404. Even Gemini 2.0 Flash was shut down June 1,
+  2026. The default here is updated to gemini-2.5-flash, the current
+  stable choice, verified with a real call in asia-south1 before
+  changing this. Its own retirement date is 2026-10-16, so this default
+  will need updating again before then — a cheaper newer option,
+  gemini-3.1-flash-lite, exists but is still PREVIEW status (no SLA) as
+  of this writing, so wasn't chosen for a project that needs a stable
+  API surface right now.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -52,7 +66,10 @@ class Settings(BaseSettings):
     # ── Vertex AI ─────────────────────────────
     VERTEX_AI_LOCATION: str = "asia-south1"
     VERTEX_EMBEDDING_MODEL: str = "text-embedding-004"
-    VERTEX_GENERATION_MODEL: str = "gemini-1.5-flash"
+    # gemini-1.5-flash is fully shut down (404 on every request, confirmed
+    # 2026-07). gemini-2.5-flash is the current stable choice — retires
+    # 2026-10-16, revisit before then. See docstring above.
+    VERTEX_GENERATION_MODEL: str = "gemini-2.5-flash"
 
     # ── Cloud Storage ─────────────────────────
     GCS_BUCKET_NAME: str = "cognara-learn-dev"
