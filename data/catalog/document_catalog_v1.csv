@@ -1,0 +1,14 @@
+course_name,subject,chapter,topic,page_start,page_end,source_type,document_version,pdf_filename,ingestion_date,status,notes
+100 Days of Machine Learning,Machine Learning,Introduction to Machine Learning,what is ML; traditional programming vs ML; when to use ML; history,135,143,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,Day 1 intro
+100 Days of Machine Learning,Machine Learning,AI vs Machine Learning vs Deep Learning,AI/ML/DL hierarchy and differences,144,152,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,
+100 Days of Machine Learning,Machine Learning,Types of Machine Learning,supervised; unsupervised; semi-supervised; reinforcement,153,167,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,
+100 Days of Machine Learning,Machine Learning,Batch vs Online Learning,offline vs online learning,168,174,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,
+100 Days of Machine Learning,Machine Learning,Online Machine Learning,online learning in depth,175,184,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,
+100 Days of Machine Learning,Machine Learning,Instance-Based vs Model-Based Learning,instance vs model based,185,191,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,
+100 Days of Machine Learning,Machine Learning,Major Challenges in Machine Learning,common ML challenges,192,192,campusx_notes,v1,100 days ML Notes v2.pdf,,not_started,single page
+100 Days of Deep Learning,Deep Learning,Introduction to Deep Learning,DL vs ML; NN architectures; history; applications,37,95,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part I
+100 Days of Deep Learning,Deep Learning,Perceptrons,perceptron; perceptron trick; loss functions; problems with perceptron,96,134,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part II
+100 Days of Deep Learning,Deep Learning,Multi-Layer Perceptrons,MLP notation; MLP intuition; forward propagation,135,161,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part III
+100 Days of Deep Learning,Deep Learning,Practical Applications with ANN,churn prediction; MNIST; graduate admission regression,162,190,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part IV
+100 Days of Deep Learning,Deep Learning,Training Neural Networks,loss functions; backpropagation (what/how/why); memoization,191,229,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part V
+100 Days of Deep Learning,Deep Learning,Gradient Problems in Neural Networks,gradient descent types; vanishing and exploding gradients,230,251,campusx_notes,v1,100 DAYS OF DL.pdf,,not_started,Part VI

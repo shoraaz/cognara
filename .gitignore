@@ -1,0 +1,29 @@
+# ── Environment ───────────────────────────────
+.env
+*.env.local
+
+# ── GCP credentials ───────────────────────────
+*service_account*.json
+*credentials*.json
+cloud-sql-proxy
+cloud-sql-proxy.exe
+
+# ── Python ────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.uv/
+dist/
+*.egg-info/
+
+# ── Raw PDFs (large files, store in GCS) ──────
+data/raw_pdfs/
+
+# ── IDE ───────────────────────────────────────
+.vscode/
+.idea/
+
+# ── OS ────────────────────────────────────────
+.DS_Store
+Thumbs.db
