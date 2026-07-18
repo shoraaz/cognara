@@ -31,6 +31,23 @@ class AskRequest(BaseModel):
     )
 
 
+class LearningModeRequest(BaseModel):
+    """
+    Request shape for Layer 5's single-turn learning modes (Explain,
+    Compare, Study-Plan) — see ADR 0008. topic_b is only used by Compare
+    mode, and is REQUIRED for it (validated in learning_modes.py, not
+    here, since the requirement is mode-conditional on which endpoint/
+    mode value is used, not a fixed schema rule).
+    """
+    topic: str = Field(..., min_length=3, max_length=500, description="The main topic or question.")
+    topic_b: Optional[str] = Field(
+        default=None,
+        description="The second topic to compare against — REQUIRED for Compare mode only.",
+    )
+    course_filter: Optional[str] = None
+    chapter_filter: Optional[str] = None
+
+
 # ── Citation ──────────────────────────────────────────────────────────────────
 
 class Citation(BaseModel):

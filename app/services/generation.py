@@ -12,6 +12,8 @@ WHY THIS FILE EXISTS:
 WHERE IT FITS:
   ask_service.py -> CRAG (retrieval + grading) -> generation (this file)
   -> faithfulness.py (Layer 4 check) -> AskResponse
+  learning_modes.py (Layer 5) also calls generate() directly, passing a
+  mode-specific system_prompt — see LAYER 5 ADDITION below.
 
 WHY ChatVertexAI, NOT ChatGoogleGenerativeAI (a real, deliberate choice):
   Both VertexAIEmbeddings and ChatVertexAI raise LangChainDeprecationWarnings
@@ -42,14 +44,22 @@ PROMPT DESIGN — WHY CITATIONS ARE ENFORCED IN THE PROMPT:
   answer ONLY from the provided evidence and cite chunk tags like [1] or [2].
 
 LAYER 4 ADDITION — REGENERATION WITH FEEDBACK (see ADR 0007):
-  generate() now accepts an optional feedback parameter. When
+  generate() accepts an optional unsupported_claims parameter. When
   app.services.faithfulness.check_faithfulness() flags specific unsupported
   claims after a first generation attempt, ask_service.py calls generate()
   a SECOND time with that feedback, which is woven into the prompt as an
-  explicit list of claims to avoid repeating. This is the "regenerate once
-  with stricter instructions" half of Layer 4's retry policy — generation.py
-  owns the PROMPT change; faithfulness.py owns the JUDGMENT that triggers it;
-  ask_service.py owns the bounded retry-then-abstain control flow.
+  explicit list of claims to avoid repeating.
+
+LAYER 5 ADDITION — SWAPPABLE SYSTEM PROMPT FOR LEARNING MODES (see ADR 0008):
+  generate() now accepts an optional system_prompt parameter, defaulting to
+  the plain-Q&A SYSTEM_PROMPT below. app.services.learning_modes.py (Explain/
+  Compare/Study-Plan) calls generate() directly with its own mode-specific
+  system prompt, reusing EVERYTHING ELSE in this function unchanged: evidence-
+  block building, citation tagging, the regeneration-feedback path, and real
+  token accounting. This was a deliberate choice over duplicating generate()
+  per mode — CRAG's retrieval/grading and Layer 4's faithfulness check apply
+  identically regardless of which mode produced the answer, so only the
+  system prompt actually needs to vary.
 
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/services/generation.py"
 """
@@ -63,8 +73,9 @@ from app.core.logging import get_logger
 logger = get_logger(__name__)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-# Instructions that frame every generation call: evidence-only answering,
-# citation tags, and honest abstention when the evidence is insufficient.
+# Default instructions for plain Q&A: evidence-only answering, citation tags,
+# and honest abstention when the evidence is insufficient. Learning modes
+# (see learning_modes.py) pass their own system_prompt instead of this one.
 SYSTEM_PROMPT = """You are Cognara Learn, an evidence-verified AI learning copilot.
 
 You answer ONLY using the numbered evidence chunks provided below. Follow these rules strictly:
@@ -117,6 +128,7 @@ async def generate(
     question: str,
     chunks: list[Document],
     unsupported_claims: list[str] | None = None,
+    system_prompt: str | None = None,
 ) -> tuple[str, int]:
     """
     Generate an evidence-grounded answer to `question` using `chunks` as
@@ -132,6 +144,9 @@ async def generate(
             answer as unsupported (see ADR 0007), pass those claims here —
             they are woven into the prompt as an explicit list of mistakes
             to avoid repeating. None (the default) on a first attempt.
+        system_prompt: Optional. Overrides the default plain-Q&A SYSTEM_PROMPT
+            with a mode-specific one (see learning_modes.py, ADR 0008). None
+            (the default) uses SYSTEM_PROMPT — plain /ask behaviour, unchanged.
 
     Returns:
         (answer_text, total_tokens_used) — total_tokens_used is the real
@@ -140,6 +155,7 @@ async def generate(
     # Fresh instance per call — see _get_llm() docstring for why.
     llm = _get_llm()
     evidence_block = _build_evidence_block(chunks)
+    effective_system_prompt = system_prompt or SYSTEM_PROMPT
 
     # User turn: evidence first, then question, then citation instruction.
     # Keeping the instruction close to the question (not buried in the system
@@ -164,10 +180,15 @@ async def generate(
             f"evidence provided."
         )
 
-    logger.info("generation_start", chunk_count=len(chunks), is_regeneration=bool(unsupported_claims))
+    logger.info(
+        "generation_start",
+        chunk_count=len(chunks),
+        is_regeneration=bool(unsupported_claims),
+        custom_system_prompt=system_prompt is not None,
+    )
 
     response = await llm.ainvoke([
-        ("system", SYSTEM_PROMPT),
+        ("system", effective_system_prompt),
         ("human", user_prompt),
     ])
 
