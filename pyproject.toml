@@ -48,6 +48,7 @@ dependencies = [
 
     # Layer 2 — Advanced Retrieval (see ADR 0005)
     "rank-bm25>=0.2.2",                   # real BM25Okapi keyword search, in-memory index
+    "langchain-google-community[vertexaisearch]>=2.0.0",  # VertexAIRank reranker (Discovery Engine Ranking API)
 
     # NOTE: google-adk (Layer 3 onward — CRAG, evidence gate, learning
     # modes, MCP/A2A; see ADR 0004) is intentionally NOT added yet.
