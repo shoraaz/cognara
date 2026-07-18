@@ -2,13 +2,13 @@
 tests/integration/test_ask_service.py
 ----------------------------------------
 Tests for app/services/ask_service.py — the full RAG pipeline via the
-Layer 3 CRAG agent, end to end.
+Layer 3 CRAG agent and Layer 4 faithfulness gate, end to end.
 
 WHY THIS IS AN INTEGRATION TEST:
   This is the top of the stack: real hybrid search + rerank (Layer 2),
-  real CRAG grading and retry (Layer 3), real Gemini generation. These
-  tests prove the whole system works together, not just each piece in
-  isolation.
+  real CRAG grading and retry (Layer 3), real Gemini generation, real
+  post-generation faithfulness checking (Layer 4). These tests prove the
+  whole system works together, not just each piece in isolation.
 
 REFACTOR NOTE (Layer 3 wiring):
   ask_service.py no longer manages its own CognaraPGVectorStore
@@ -73,8 +73,9 @@ class TestAnswerRealCorpus:
         """
         The flagship end-to-end test: a real question about a concept
         genuinely covered in the ingested corpus. Proves CRAG retrieval
-        -> grading -> generation -> citation assembly all work together
-        against live data, through the real Layer 3 wiring.
+        -> grading -> generation -> faithfulness check -> citation
+        assembly all work together against live data, through the real
+        Layer 3 + Layer 4 wiring.
         """
         request = AskRequest(question="Explain the vanishing gradient problem.")
         response = await ask_service.answer(request, request_id="test-1")
@@ -84,6 +85,7 @@ class TestAnswerRealCorpus:
         assert len(response.citations) > 0
         assert response.confidence in ("high", "medium", "low")
         assert response.tokens_used > 0
+        assert isinstance(response.was_regenerated, bool)
 
         chapters = [c.chapter for c in response.citations]
         assert any("Gradient" in ch for ch in chapters)
@@ -141,3 +143,19 @@ class TestAnswerRealCorpus:
         if response.abstained:
             assert response.citations == []
             assert response.abstain_reason is not None
+
+    @requires_ask_service
+    @pytest.mark.asyncio
+    async def test_was_regenerated_defaults_false_for_a_faithful_answer(self):
+        """
+        A clear, well-covered question with a genuinely faithful first
+        answer should NOT trigger Layer 4's regeneration path — proven
+        directly (not just schema-defaulted) against a real question
+        where the first generation attempt is expected to already be
+        faithful.
+        """
+        request = AskRequest(question="What is gradient descent?")
+        response = await ask_service.answer(request, request_id="test-6")
+
+        if not response.abstained:
+            assert response.was_regenerated is False

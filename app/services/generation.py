@@ -10,7 +10,8 @@ WHY THIS FILE EXISTS:
   prompt or talks to the chat model directly.
 
 WHERE IT FITS:
-  ask_service.py -> retrieval (vector_store) -> generation (this file) -> AskResponse
+  ask_service.py -> CRAG (retrieval + grading) -> generation (this file)
+  -> faithfulness.py (Layer 4 check) -> AskResponse
 
 WHY ChatVertexAI, NOT ChatGoogleGenerativeAI (a real, deliberate choice):
   Both VertexAIEmbeddings and ChatVertexAI raise LangChainDeprecationWarnings
@@ -39,6 +40,16 @@ PROMPT DESIGN — WHY CITATIONS ARE ENFORCED IN THE PROMPT:
   will often blend in outside knowledge even when given context — a well-
   documented RAG failure mode. The prompt explicitly instructs the model to
   answer ONLY from the provided evidence and cite chunk tags like [1] or [2].
+
+LAYER 4 ADDITION — REGENERATION WITH FEEDBACK (see ADR 0007):
+  generate() now accepts an optional feedback parameter. When
+  app.services.faithfulness.check_faithfulness() flags specific unsupported
+  claims after a first generation attempt, ask_service.py calls generate()
+  a SECOND time with that feedback, which is woven into the prompt as an
+  explicit list of claims to avoid repeating. This is the "regenerate once
+  with stricter instructions" half of Layer 4's retry policy — generation.py
+  owns the PROMPT change; faithfulness.py owns the JUDGMENT that triggers it;
+  ask_service.py owns the bounded retry-then-abstain control flow.
 
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/services/generation.py"
 """
@@ -102,7 +113,11 @@ def _build_evidence_block(chunks: list[Document]) -> str:
     return "\n\n".join(lines)
 
 
-async def generate(question: str, chunks: list[Document]) -> tuple[str, int]:
+async def generate(
+    question: str,
+    chunks: list[Document],
+    unsupported_claims: list[str] | None = None,
+) -> tuple[str, int]:
     """
     Generate an evidence-grounded answer to `question` using `chunks` as
     the only permitted source of facts.
@@ -112,6 +127,11 @@ async def generate(question: str, chunks: list[Document]) -> tuple[str, int]:
         chunks: Retrieved evidence Documents (already filtered/thresholded by
             the CRAG agent) — this function does not re-check relevance, it
             trusts what it's given.
+        unsupported_claims: Optional. If this is a REGENERATION attempt after
+            Layer 4's faithfulness check flagged specific claims in a prior
+            answer as unsupported (see ADR 0007), pass those claims here —
+            they are woven into the prompt as an explicit list of mistakes
+            to avoid repeating. None (the default) on a first attempt.
 
     Returns:
         (answer_text, total_tokens_used) — total_tokens_used is the real
@@ -131,7 +151,20 @@ async def generate(question: str, chunks: list[Document]) -> tuple[str, int]:
         f"numbers like [1] where relevant."
     )
 
-    logger.info("generation_start", chunk_count=len(chunks))
+    # Layer 4 regeneration path: append the specific unsupported claims from
+    # the PREVIOUS attempt, so the model has concrete feedback rather than
+    # just being asked to "try again" — see ADR 0007's retry policy.
+    if unsupported_claims:
+        claims_list = "\n".join(f"- {c}" for c in unsupported_claims)
+        user_prompt += (
+            f"\n\nIMPORTANT: a previous answer attempt included these claims "
+            f"that are NOT actually supported by the evidence above:\n{claims_list}\n"
+            f"Do not repeat these or any similar unsupported claims. Every "
+            f"statement in your answer must be directly traceable to the "
+            f"evidence provided."
+        )
+
+    logger.info("generation_start", chunk_count=len(chunks), is_regeneration=bool(unsupported_claims))
 
     response = await llm.ainvoke([
         ("system", SYSTEM_PROMPT),

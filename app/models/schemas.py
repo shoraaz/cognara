@@ -63,5 +63,12 @@ class AskResponse(BaseModel):
         default=None,
         description="Reason for abstention, shown to the user.",
     )
+    was_regenerated: bool = Field(
+        default=False,
+        description="True when Layer 4's faithfulness check flagged the "
+                    "first generated answer as unsupported by its evidence, "
+                    "and this is the corrected, regenerated version. See "
+                    "ADR 0007.",
+    )
     tokens_used: Optional[int] = None
     latency_ms: Optional[float] = None

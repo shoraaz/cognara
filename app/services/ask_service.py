@@ -6,9 +6,10 @@ Orchestrates the full answer pipeline for one user question.
 WHY THIS FILE EXISTS:
   The route (ask.py) handles HTTP. Retrieval, grading, and retry logic
   live in the CRAG agent (Layer 3). Generation lives in generation.py.
-  This file is the conductor — it calls CRAG, interprets its decision,
-  calls generation if warranted, and assembles the final response.
-  No HTTP logic here, no raw LLM calls here.
+  Post-generation faithfulness checking lives in faithfulness.py (Layer 4).
+  This file is the conductor — it calls each in order, interprets their
+  decisions, and assembles the final response. No HTTP logic here, no
+  raw LLM calls here.
 
 EXECUTION FLOW:
   1. Run the CRAG agent (app.agents.crag_runner.run_crag) — this
@@ -20,10 +21,16 @@ EXECUTION FLOW:
      response immediately — do not call generation at all.
   3. If CRAG's final decision is "use": build the prompt with CRAG's
      evidence chunks and call Gemini (app.services.generation).
-  4. Assemble citations from the SAME chunks CRAG graded and generation
+  4. Check the generated answer's faithfulness against its own evidence
+     (app.services.faithfulness — Layer 4, ADR 0007). If unfaithful,
+     regenerate EXACTLY ONCE with the specific unsupported claims called
+     out. If the second attempt is STILL unfaithful, fall back to an
+     honest abstain rather than returning a known-unsupported answer.
+  5. Assemble citations from the SAME chunks CRAG graded and generation
      used — never a separate, possibly-different re-fetch.
-  5. Return AskResponse with answer, citations, confidence label, and
-     real token usage.
+  6. Return AskResponse with answer, citations, confidence label,
+     was_regenerated flag, and real token usage (summed across both
+     generation attempts if a regeneration happened).
 
 WHY CRAG'S GRADE REPLACES A FIXED SCORE THRESHOLD:
   The original abstention logic was a fixed numeric check:
@@ -35,20 +42,28 @@ WHY CRAG'S GRADE REPLACES A FIXED SCORE THRESHOLD:
   internally by hybrid_search/vector_store's k defaults, but the
   ask_service-level gate is now CRAG's decision, not a raw score check.
 
+WHY LAYER 4's RETRY IS BOUNDED THE SAME WAY CRAG's IS (see ADR 0007):
+  Exactly one regeneration attempt, then abstain — mirroring CRAG's own
+  "retry once, then commit" pattern (ADR 0006). An unbounded regeneration
+  loop would repeat the exact class of problem CRAG's round-1/round-2
+  bugs already taught: an instruction alone ("try again until faithful")
+  is not a hard guarantee, and a real system needs a hard stop.
+
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/services/ask_service.py"
 """
 
 from app.agents.crag_runner import run_crag
 from app.models.schemas import AskRequest, AskResponse, Citation
 from app.core.logging import get_logger
-from app.services import generation
+from app.services import faithfulness, generation
 
 logger = get_logger(__name__)
 
 
 async def answer(request: AskRequest, request_id: str) -> AskResponse:
     """
-    Full RAG pipeline for one question, via the Layer 3 CRAG agent.
+    Full RAG pipeline for one question, via the Layer 3 CRAG agent and
+    the Layer 4 faithfulness gate.
     Returns an AskResponse (with citations) or an abstained response.
     """
     # ── Step 1: CRAG retrieval + grading + optional retry (Layers 2–3) ──────
@@ -82,22 +97,73 @@ async def answer(request: AskRequest, request_id: str) -> AskResponse:
 
     # ── Step 3: Generate answer with CRAG's graded evidence ─────────────────
     # Convert chunk dicts to LangChain Documents so generation.generate()
-    # (unchanged from Layer 1) receives its expected input type.
+    # receives its expected input type.
     langchain_docs = [_chunk_dict_to_document(c) for c in evidence_chunks]
     answer_text, tokens = await generation.generate(request.question, langchain_docs)
+    total_tokens = tokens
 
-    # ── Step 4: Build citations from the SAME chunks CRAG graded ────────────
+    # ── Step 4: Layer 4 — check faithfulness, regenerate once if needed ─────
+    faithfulness_result = await faithfulness.check_faithfulness(answer_text, langchain_docs)
+    was_regenerated = False
+
+    logger.info(
+        "faithfulness_decision",
+        request_id=request_id,
+        is_faithful=faithfulness_result.is_faithful,
+        unsupported_claim_count=len(faithfulness_result.unsupported_claims),
+    )
+
+    if not faithfulness_result.is_faithful:
+        logger.info(
+            "regenerating_unfaithful_answer",
+            request_id=request_id,
+            unsupported_claims=faithfulness_result.unsupported_claims,
+        )
+        answer_text, tokens = await generation.generate(
+            request.question, langchain_docs,
+            unsupported_claims=faithfulness_result.unsupported_claims,
+        )
+        total_tokens += tokens
+        was_regenerated = True
+
+        # Second check — did the regeneration actually fix it? If not,
+        # bounded retry policy means we stop here and abstain honestly
+        # rather than returning a still-unsupported answer (see ADR 0007).
+        recheck = await faithfulness.check_faithfulness(answer_text, langchain_docs)
+        logger.info(
+            "faithfulness_recheck_decision",
+            request_id=request_id,
+            is_faithful=recheck.is_faithful,
+            unsupported_claim_count=len(recheck.unsupported_claims),
+        )
+        if not recheck.is_faithful:
+            logger.info("abstaining_unfaithful_after_regeneration", request_id=request_id)
+            return AskResponse(
+                answer="The uploaded notes do not contain enough evidence to answer this question reliably.",
+                citations=[],
+                confidence="abstained",
+                abstained=True,
+                abstain_reason=(
+                    "Generated answer could not be verified as faithful to the "
+                    "evidence, even after one regeneration attempt."
+                ),
+                was_regenerated=True,
+                tokens_used=total_tokens,
+            )
+
+    # ── Step 5: Build citations from the SAME chunks CRAG graded ────────────
     # Using the identical evidence set guarantees citations match what the
     # answer was actually generated from, with no possibility of drift.
     citations = [_chunk_dict_to_citation(c) for c in evidence_chunks]
 
-    # ── Step 5: Assemble and return the full response ────────────────────────
+    # ── Step 6: Assemble and return the full response ────────────────────────
     return AskResponse(
         answer=answer_text,
         citations=citations,
         confidence=_confidence_label(grade["relevance_score"]),
         abstained=False,
-        tokens_used=tokens,
+        was_regenerated=was_regenerated,
+        tokens_used=total_tokens,
     )
 
 
@@ -115,9 +181,9 @@ def _confidence_label(relevance_score: float) -> str:
 def _chunk_dict_to_document(chunk: dict):
     """
     Convert a CRAG evidence chunk dict into a langchain_core.documents.Document.
-    generation.generate() expects Documents (unchanged from Layer 1), so this
-    adapter keeps the generation interface stable while CRAG's internal format
-    can evolve independently.
+    generation.generate() and faithfulness.check_faithfulness() both expect
+    Documents, so this adapter keeps their interfaces stable while CRAG's
+    internal chunk-dict format can evolve independently.
     """
     from langchain_core.documents import Document
     return Document(
