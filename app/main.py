@@ -8,10 +8,7 @@ WHY THIS FILE EXISTS:
   and run startup/shutdown lifecycle hooks. Everything else lives in
   sub-modules; this file is only wiring.
 
-INTERVIEW EXPLANATION:
-  "main.py creates the FastAPI app, registers all route groups (routers),
-  and hooks into app startup — for example, to warm the vector store
-  connection so the first request isn't slow."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "app/main.py"
 """
 
 from fastapi import FastAPI

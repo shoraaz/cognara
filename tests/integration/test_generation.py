@@ -40,18 +40,7 @@ REAL BUG FOUND AND FIXED (async/sync event loop mismatch, THREE rounds):
   pre-empt it with a probe that causes the very problem it's checking
   for.
 
-INTERVIEW EXPLANATION:
-  "This took three rounds to actually fix, and each wrong fix taught me
-  something specific about how grpc.aio interacts with asyncio event
-  loops: the channel binds to a loop at first use, and ANY asyncio.run()
-  call — not just a sync/async mismatch — tears down whatever loop it
-  created when it returns. The real fix was to stop trying to
-  proactively probe reachability with a separate event loop altogether,
-  since pytest-asyncio already manages one shared loop for the whole
-  session. I test connectivity by simply checking required config is
-  present, and let an actual unreachable-service failure be a real,
-  readable test failure — which is more honest than a probe that can
-  itself corrupt the very client under test."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "tests/integration/test_generation.py"
 """
 
 import os

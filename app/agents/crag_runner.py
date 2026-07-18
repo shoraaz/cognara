@@ -1,55 +1,37 @@
 """
 app/agents/crag_runner.py
-----------------------------
+-------------------------
 Executes the CRAG agent (app/agents/crag_agent.py) for one question,
 wrapping ADK's Runner + SessionService machinery behind a simple async
-function, matching the calling convention of app/services/generation.py.
+function that matches the calling convention of app/services/generation.py.
 
 WHY THIS FILE EXISTS:
   ADK agents are not called directly — they run inside a Runner, which
   needs a SessionService to track conversation state, even for a single,
-  one-shot question. This file owns that ceremony so callers (eventually
-  ask_service.py, once Layer 3 is wired in) get a plain async function
-  call, the same shape as generation.generate().
+  one-shot question. This file owns that ceremony so callers (ask_service.py)
+  get a plain async function call, the same shape as generation.generate().
 
 WHY InMemorySessionService, NOT A PERSISTENT SESSION STORE:
-  Each Cognara /ask request is currently independent — there is no
-  multi-turn conversation state to persist BETWEEN requests yet (that is
-  a future feature, not Layer 3's job). InMemorySessionService creates a
-  fresh session scoped to one request and discards it after — the
-  correct, minimal choice for "one question in, one graded answer out."
-  If Cognara later adds multi-turn conversation memory, revisit this
-  with VertexAiSessionService or another persistent backend.
+  Each /ask request is currently independent — there is no multi-turn
+  conversation state to persist between requests yet (that is a future
+  feature). InMemorySessionService creates a fresh session scoped to one
+  request and discards it after — the correct, minimal choice for "one
+  question in, one graded answer out."
 
-REAL BUGS FOUND AND FIXED — SEE crag_agent.py's DOCSTRING FOR FULL DETAIL:
-  Round 1: the agent no longer uses ADK's output_schema (a confirmed ADK
-  bug caused a 12x tool-call loop when output_schema and tools were
-  combined). This means the agent's final response is plain TEXT that is
-  INSTRUCTED to be JSON, not schema-enforced JSON. This file's
-  _parse_structured_output() is written defensively for that reality: it
-  strips markdown code fences (```json ... ``` — a common habit even
-  when an LLM is told to return "only JSON"), and falls back to a safe
-  abstain result on any parse failure rather than crashing the caller.
+KEY DESIGN DECISIONS (full bug stories in local-notes/BUG_FIX_LOG.md):
+  - output_schema was removed from the agent to fix a 12x tool-call loop
+    (ADK bug, Round 1). Agent final response is plain text; _parse_structured_output()
+    parses it defensively, stripping markdown fences and falling back to a
+    safe abstain result on any parse failure.
+  - reset_grade_call_count() is called at the start of every run so each
+    question gets a fresh 2-call grading budget (Round 2 fix).
+  - Evidence chunks are extracted directly from ADK's event stream via
+    event.get_function_responses(), tracking the MOST RECENT search_notes
+    result (Round 5 fix). On a retry path, the SECOND search's results are
+    what the final grade was based on — a separate re-fetch could silently
+    return different results.
 
-  Round 2: reset_grade_call_count() is called at the START of every run,
-  before the agent executes — this gives crag_agent.py's hard, code-level
-  "grade at most twice" counter a clean slate for each new question,
-  rather than counting calls across the whole process's lifetime (which
-  would incorrectly start refusing legitimate grades on a SECOND
-  question after the first question already used its budget).
-
-INTERVIEW EXPLANATION:
-  "ADK agents always run through a Runner with a SessionService, even
-  for a single-shot question. I use InMemorySessionService because each
-  Cognara question is currently independent. Since I dropped ADK's
-  output_schema to work around a real framework bug, I parse the agent's
-  final text response as JSON myself, defensively. I also reset my
-  grading-tool call counter at the start of every run — a hard backstop
-  against a soft instruction-following slip I saw once, where the agent
-  called my grading tool three times instead of two — and that reset has
-  to happen per-question, not just once at import time, or a SECOND
-  question would incorrectly inherit the first question's used-up
-  budget."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "app/agents/crag_runner.py"
 """
 
 import json
@@ -65,33 +47,44 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Identifier for this application within ADK's session management.
 APP_NAME = "cognara_crag"
 
+# Regex to strip markdown code fences the model sometimes wraps JSON in,
+# e.g. ```json\n{...}\n``` or ```\n{...}\n```.
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
 
 async def run_crag(question: str, course_filter: str | None = None) -> dict:
     """
     Run the CRAG agent for one question: retrieve, grade, retry once if
-    needed, and return the critic's final structured decision.
+    needed, and return the critic's final structured decision TOGETHER
+    with the real evidence chunks that decision was based on.
 
     Args:
         question: The user's question.
-        course_filter: Currently informational only — passed as context
-            in the initial message since ADK tool calls are agent-
-            initiated, not directly parameterized by the caller. The
-            agent's search_notes tool itself accepts course_filter, and
-            a future refinement could thread this through more directly.
+        course_filter: Passed as context in the initial message text since
+            ADK tool calls are agent-initiated, not directly parameterised
+            by the caller. The agent's search_notes tool accepts it.
 
     Returns:
-        A dict matching RetrievalGrade's shape: relevance_score,
-        completeness_score, decision, reason, rewritten_query.
+        A dict with:
+          - grade: RetrievalGrade shape (relevance_score, completeness_score,
+            decision, reason, rewritten_query)
+          - evidence_chunks: list of chunk dicts from the LAST search_notes
+            call the agent made — the exact evidence the final grade was
+            based on. See BUG_FIX_LOG.md "CRAG Runner Round 5".
     """
-    reset_grade_call_count()  # fresh 2-call budget for THIS question — see module docstring
+    # Give this question a clean 2-call grading budget — see crag_agent.py's
+    # _grade_call_count and BUG_FIX_LOG.md "CRAG Agent Round 2".
+    reset_grade_call_count()
 
+    # Fresh agent instance per call — same async gRPC event-loop reasoning as
+    # generation.py's _get_llm(). See BUG_FIX_LOG.md "Generation: async gRPC".
     agent = build_crag_agent()
     session_service = InMemorySessionService()
 
+    # Each request gets its own isolated session — no state bleeds between calls.
     user_id = "cognara_user"
     session_id = str(uuid.uuid4())
 
@@ -101,6 +94,8 @@ async def run_crag(question: str, course_filter: str | None = None) -> dict:
 
     runner = Runner(agent=agent, app_name=APP_NAME, session_service=session_service)
 
+    # Build the initial message; append course_filter hint as plain text so the
+    # agent can thread it into search_notes(course_filter=...) calls.
     message_text = question
     if course_filter:
         message_text += f"\n\n(Restrict search to course: {course_filter})"
@@ -111,35 +106,69 @@ async def run_crag(question: str, course_filter: str | None = None) -> dict:
 
     final_response_text = None
     tool_call_count = 0
+    # Tracks the most recent search_notes result — updated on every search_notes
+    # response so on a retry path we end up with the SECOND (final) search's chunks.
+    latest_evidence_chunks: list[dict] = []
+
     async for event in runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
-        if getattr(event, "get_function_calls", None) and event.get_function_calls():
-            tool_call_count += len(event.get_function_calls())
+        # Count every tool call for observability (logged at run end).
+        function_calls = event.get_function_calls() if getattr(event, "get_function_calls", None) else None
+        if function_calls:
+            tool_call_count += len(function_calls)
+
+        # Extract evidence chunks from search_notes responses.
+        # ADK wraps non-dict tool returns under a "result" key — search_notes
+        # returns a list, so handle both shapes defensively.
+        function_responses = event.get_function_responses() if getattr(event, "get_function_responses", None) else None
+        if function_responses:
+            for resp in function_responses:
+                if resp.name == "search_notes" and isinstance(resp.response, dict):
+                    raw = resp.response.get("result", resp.response)
+                    if isinstance(raw, list):
+                        # Overwrite on every search_notes call so we always
+                        # hold the LATEST (most recently graded) result set.
+                        latest_evidence_chunks = raw
+
+        # Capture the agent's final text output (the instructed JSON blob).
         if event.is_final_response() and event.content and event.content.parts:
             final_response_text = event.content.parts[0].text
 
-    logger.info("crag_run_done", has_response=final_response_text is not None, tool_call_count=tool_call_count)
+    logger.info(
+        "crag_run_done",
+        has_response=final_response_text is not None,
+        tool_call_count=tool_call_count,
+        evidence_chunk_count=len(latest_evidence_chunks),
+    )
 
+    # Guard: if the agent produced no final response at all, return a safe abstain.
     if final_response_text is None:
         return {
-            "relevance_score": 0.0,
-            "completeness_score": 0.0,
-            "decision": "abstain",
-            "reason": "CRAG agent produced no final response.",
-            "rewritten_query": None,
+            "grade": {
+                "relevance_score":    0.0,
+                "completeness_score": 0.0,
+                "decision":           "abstain",
+                "reason":             "CRAG agent produced no final response.",
+                "rewritten_query":    None,
+            },
+            "evidence_chunks": latest_evidence_chunks,
         }
 
-    return _parse_structured_output(final_response_text)
+    grade = _parse_structured_output(final_response_text)
+    return {"grade": grade, "evidence_chunks": latest_evidence_chunks}
 
 
 def _parse_structured_output(text: str) -> dict:
     """
-    Parse the agent's final response text as JSON matching
-    RetrievalGrade's shape. Since output_schema is deliberately NOT used
-    (see module docstring), this text is instructed-but-not-enforced
-    JSON — strip common LLM habits (markdown code fences) before
-    parsing, and fall back to a safe abstain result on any failure
-    rather than crashing the caller.
+    Parse the agent's final response text as JSON matching RetrievalGrade's
+    shape. Since output_schema is deliberately NOT used (see module docstring),
+    this text is instructed-but-not-enforced JSON. We:
+      1. Strip markdown code fences (common LLM habit).
+      2. Parse with json.loads().
+      3. Validate required keys are present.
+      4. Fall back to a safe abstain result on any failure, rather than
+         crashing the caller with an unhandled exception.
     """
+    # Strip markdown code fences like ```json ... ``` or ``` ... ```
     cleaned = _JSON_FENCE_RE.sub("", text.strip()).strip()
 
     try:
@@ -147,25 +176,27 @@ def _parse_structured_output(text: str) -> dict:
     except (json.JSONDecodeError, TypeError) as e:
         logger.info("crag_parse_fallback", error=str(e), raw_text=text[:200])
         return {
-            "relevance_score": 0.0,
+            "relevance_score":    0.0,
             "completeness_score": 0.0,
-            "decision": "abstain",
-            "reason": f"Could not parse CRAG agent output: {text[:200]}",
-            "rewritten_query": None,
+            "decision":           "abstain",
+            "reason":             f"Could not parse CRAG agent output: {text[:200]}",
+            "rewritten_query":    None,
         }
 
-    # Validate required keys are present, even if types weren't strictly
-    # enforced by a schema — a shallow but useful sanity check.
+    # Shallow key-presence check — catches missing required fields without a
+    # full Pydantic validation pass (which would raise, not fall back).
     required_keys = {"relevance_score", "completeness_score", "decision", "reason"}
     if not required_keys.issubset(parsed.keys()):
         logger.info("crag_parse_missing_keys", parsed_keys=list(parsed.keys()))
         return {
-            "relevance_score": 0.0,
+            "relevance_score":    0.0,
             "completeness_score": 0.0,
-            "decision": "abstain",
-            "reason": f"CRAG agent output missing required fields: {parsed}",
-            "rewritten_query": None,
+            "decision":           "abstain",
+            "reason":             f"CRAG agent output missing required fields: {parsed}",
+            "rewritten_query":    None,
         }
 
+    # Ensure rewritten_query is always present in the returned dict (even if the
+    # model omitted it for non-retry decisions) so callers don't need a .get().
     parsed.setdefault("rewritten_query", None)
     return parsed

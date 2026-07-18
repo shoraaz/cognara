@@ -13,7 +13,8 @@ WHY THIS IS AN INTEGRATION TEST:
   every other integration test file.
 
 WHAT THESE TESTS PROVE, based on real, reproduced behaviour during
-development (see crag_agent.py's docstring for the full bug history):
+development (see crag_agent.py's docstring / local-notes/BUG_FIX_LOG.md
+for the full bug history):
   - A clear, well-covered question is graded once and used (no
     unnecessary retry).
   - A deliberately vague question triggers the retry path: grade ->
@@ -23,6 +24,12 @@ development (see crag_agent.py's docstring for the full bug history):
     calls per question, regardless of what the agent might otherwise do.
   - Output is always parseable, valid JSON matching RetrievalGrade's
     shape, even though ADK's output_schema is deliberately not used.
+
+FIX NOTE: run_crag() returns {"grade": {...}, "evidence_chunks": [...]}
+(added so callers can build citations from the exact evidence CRAG
+graded — see crag_runner.py's docstring, "Round 5"). The three
+TestCragRunReal tests below were written against an earlier flat-dict
+return shape and were updated to unwrap result["grade"] accordingly.
 """
 
 import pytest
@@ -105,19 +112,24 @@ class TestCragRunReal:
         wasted retry.
         """
         result = await run_crag("Explain the vanishing gradient problem.")
-        assert result["decision"] == "use"
-        assert result["relevance_score"] > 0.5
-        assert result["reason"]  # non-empty
+        grade = result["grade"]
+        assert grade["decision"] == "use"
+        assert grade["relevance_score"] > 0.5
+        assert grade["reason"]  # non-empty
+        assert len(result["evidence_chunks"]) > 0
 
     @requires_crag
     @pytest.mark.asyncio
     async def test_result_matches_retrieval_grade_shape(self):
         result = await run_crag("What is gradient descent?")
+        assert "grade" in result
+        assert "evidence_chunks" in result
+        grade = result["grade"]
         required_keys = {"relevance_score", "completeness_score", "decision", "reason", "rewritten_query"}
-        assert required_keys.issubset(result.keys())
-        assert result["decision"] in ("use", "abstain")  # never "retry" as FINAL decision
-        assert 0.0 <= result["relevance_score"] <= 1.0
-        assert 0.0 <= result["completeness_score"] <= 1.0
+        assert required_keys.issubset(grade.keys())
+        assert grade["decision"] in ("use", "abstain")  # never "retry" as FINAL decision
+        assert 0.0 <= grade["relevance_score"] <= 1.0
+        assert 0.0 <= grade["completeness_score"] <= 1.0
 
     @requires_crag
     @pytest.mark.asyncio
@@ -130,5 +142,6 @@ class TestCragRunReal:
         (see crag_agent.py's bug history for the full trail).
         """
         result = await run_crag("improvements")
-        assert result["decision"] in ("use", "abstain")
-        assert result["reason"]
+        grade = result["grade"]
+        assert grade["decision"] in ("use", "abstain")
+        assert grade["reason"]

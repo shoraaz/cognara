@@ -9,11 +9,7 @@ WHY THIS FILE EXISTS:
   automatically. If a field is missing or the wrong type, we get a clear
   422 error, not a silent KeyError deep in the stack.
 
-INTERVIEW EXPLANATION:
-  "We define the input/output contract with Pydantic models. This means
-  FastAPI auto-generates the OpenAPI schema, we get runtime validation for
-  free, and every module boundary is typed. That's standard in production
-  Python services."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "app/models/schemas.py"
 """
 
 from pydantic import BaseModel, Field

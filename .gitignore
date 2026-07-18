@@ -24,6 +24,9 @@ data/raw_pdfs/
 .vscode/
 .idea/
 
+# ── Local-only notes ──────────────────────────
+local-notes/
+
 # ── OS ────────────────────────────────────────
 .DS_Store
 Thumbs.db

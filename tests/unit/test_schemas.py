@@ -9,10 +9,7 @@ WHY THIS FILE EXISTS:
   question that's too short, or AskResponse fails when a citation is
   missing page_number, we catch it here, not in production.
 
-INTERVIEW EXPLANATION:
-  "We test schema validation first. These tests have zero external
-  dependencies — no GCP, no Chroma. They run in CI in under a second and
-  catch contract bugs before they reach the service layer."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "tests/unit/test_schemas.py"
 """
 
 import pytest

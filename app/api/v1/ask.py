@@ -15,10 +15,7 @@ EXECUTION FLOW:
        (retrieval + generation live there, not here)
     -> return AskResponse
 
-INTERVIEW EXPLANATION:
-  "The route is thin — it only handles HTTP concerns: parse the body,
-  call the service, return the response. All ML logic lives in the service
-  layer so it can be tested without starting a web server."
+# Interview notes: local-notes/INTERVIEW_PREP.md — "app/api/v1/ask.py"
 """
 
 import time
