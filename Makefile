@@ -7,31 +7,45 @@
 
 .PHONY: install install-dev dev lint fmt test ingest db-proxy db-init db-start db-stop help
 
-## Install all dependencies using uv
+## Install all dependencies using uv.
+## --no-install-project: Cognara Learn is an application, not a published
+## library, so it never needs to be built/installed as its own package —
+## only its dependencies matter. This also avoids a real Windows Smart
+## App Control issue: without this flag, `uv sync` builds a wheel of
+## the project itself using a temp-built Python executable, which Smart
+## App Control blocks as an unsigned binary (Code Integrity event ID
+## 3077/3118, "did not meet the Enterprise signing level requirements").
+## PowerShell equivalent:
+##   uv sync --no-install-project
 install:
-	uv sync
+	uv sync --no-install-project
 
 ## Install dev dependencies too
 install-dev:
-	uv sync --extra dev
+	uv sync --extra dev --no-install-project
 
-## Run the FastAPI dev server (hot reload)
+## Run the FastAPI dev server (hot reload).
+## --no-sync on every `uv run` below: skips the pre-run project sync
+## step, which is what triggers the same Smart App Control block as
+## `uv sync` without --no-install-project (see the `install` target
+## above). Run `make install-dev` first whenever dependencies change;
+## --no-sync then just runs against the venv as it already is.
 dev:
-	uv run uvicorn app.main:app --reload --port 8000
+	uv run --no-sync uvicorn app.main:app --reload --port 8000
 
 ## Lint and format check
 lint:
-	uv run ruff check .
-	uv run ruff format --check .
+	uv run --no-sync ruff check .
+	uv run --no-sync ruff format --check .
 
 ## Auto-fix lint issues
 fmt:
-	uv run ruff format .
-	uv run ruff check --fix .
+	uv run --no-sync ruff format .
+	uv run --no-sync ruff check --fix .
 
 ## Run all tests
 test:
-	uv run pytest -v
+	uv run --no-sync pytest -v
 
 ## Start the Cloud SQL instance (compute billing resumes). Run this first
 ## in a dev session. PowerShell equivalent:
@@ -63,12 +77,12 @@ db-proxy:
 ## running for this. Requires the instance to be started (make db-start)
 ## and a `gcloud auth application-default login` session to exist.
 db-init:
-	uv run python -m ingestion.pipelines.init_db
+	uv run --no-sync python -m ingestion.pipelines.init_db
 
 ## Run ingestion on the Phase 1 subset.
 ## Usage: make ingest PDF_DIR=data/raw_pdfs
 ingest:
-	uv run python -m ingestion.pipelines.run_ingestion --pdf-dir $(PDF_DIR)
+	uv run --no-sync python -m ingestion.pipelines.run_ingestion --pdf-dir $(PDF_DIR)
 
 ## Show this help
 help:

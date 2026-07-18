@@ -46,6 +46,9 @@ dependencies = [
     "langchain-postgres>=0.0.12",         # kept only for its Embeddings/VectorStore base re-exports;
                                            # NOT used for its PGVector class — see app/retrieval/vector_store.py
 
+    # Layer 2 — Advanced Retrieval (see ADR 0005)
+    "rank-bm25>=0.2.2",                   # real BM25Okapi keyword search, in-memory index
+
     # NOTE: google-adk (Layer 3 onward — CRAG, evidence gate, learning
     # modes, MCP/A2A; see ADR 0004) is intentionally NOT added yet.
     # We add it when we actually start Layer 3, not speculatively now —
@@ -53,7 +56,7 @@ dependencies = [
     # actively using. Confirmed real PyPI package name: "google-adk".
 
     # GCP — all used from day one
-    "google-cloud-aiplatform>=1.55.0",   # Vertex AI: Gemini + embeddings
+    "google-cloud-aiplatform>=1.55.0",   # Vertex AI: Gemini + embeddings + Ranking API (Layer 2 rerank)
     "google-cloud-storage>=2.16.0",       # raw PDFs + processed chunk JSONL
     "google-cloud-bigquery>=3.21.0",      # eval logs + query logs
     "google-cloud-logging>=3.10.0",       # structured app logs
