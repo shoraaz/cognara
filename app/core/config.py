@@ -45,7 +45,30 @@ REAL BUG FOUND AND FIXED (Module 5 / generation.py development):
   gemini-3.1-flash-lite, exists but is still PREVIEW status (no SLA) as
   of this writing, so wasn't chosen for a project that needs a stable
   API surface right now.
+
+REAL BUG FOUND AND FIXED (Layer 3 / ADK CRAG agent development):
+  The first real run of the ADK CRAG agent (app/agents/crag_agent.py)
+  crashed with "ValueError: No API key was provided" — not a Cloud SQL
+  or Vertex AI project problem, but ADK silently trying to use the
+  CONSUMER Gemini Developer API (needs GOOGLE_API_KEY) instead of Vertex
+  AI. Root cause, found by reading the actual traceback: ADK's Agent
+  class does not take a vertexai=True constructor argument the way
+  GoogleGenerativeAIEmbeddings (embedder.py) does — it goes through the
+  unified google-genai SDK underneath, which selects its backend PURELY
+  from three environment variables: GOOGLE_GENAI_USE_VERTEXAI,
+  GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION. Our .env only ever
+  defined GCP_PROJECT_ID and VERTEX_AI_LOCATION — different names the
+  google-genai SDK does not recognise at all.
+  FIX: set the three google-genai-specific environment variables
+  explicitly at process startup (see _configure_adk_vertex_backend()
+  below), derived from our own settings fields, rather than requiring a
+  second, duplicate set of variables in .env. This keeps .env as the
+  single source of truth (GCP_PROJECT_ID, VERTEX_AI_LOCATION) while
+  still satisfying google-genai's specific, non-negotiable variable
+  names.
 """
+
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -123,5 +146,24 @@ class Settings(BaseSettings):
         )
 
 
+def _configure_adk_vertex_backend(settings_obj: "Settings") -> None:
+    """
+    Set the three environment variables the unified google-genai SDK
+    (used internally by both ADK's Agent class and, transitively, by
+    google-cloud-aiplatform) requires to select the Vertex AI backend
+    instead of the consumer Gemini Developer API. See this file's
+    docstring — REAL BUG FOUND AND FIXED (Layer 3) — for the full story.
+
+    Only sets a variable if it is not ALREADY set in the real OS
+    environment — this respects an explicit override (e.g. in a
+    deployment environment that sets these directly) rather than
+    silently clobbering it.
+    """
+    os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "TRUE")
+    os.environ.setdefault("GOOGLE_CLOUD_PROJECT", settings_obj.GCP_PROJECT_ID)
+    os.environ.setdefault("GOOGLE_CLOUD_LOCATION", settings_obj.VERTEX_AI_LOCATION)
+
+
 # Single shared instance — import this everywhere
 settings = Settings()
+_configure_adk_vertex_backend(settings)

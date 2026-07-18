@@ -50,11 +50,13 @@ dependencies = [
     "rank-bm25>=0.2.2",                   # real BM25Okapi keyword search, in-memory index
     "langchain-google-community[vertexaisearch]>=2.0.0",  # VertexAIRank reranker (Discovery Engine Ranking API)
 
-    # NOTE: google-adk (Layer 3 onward — CRAG, evidence gate, learning
-    # modes, MCP/A2A; see ADR 0004) is intentionally NOT added yet.
-    # We add it when we actually start Layer 3, not speculatively now —
-    # keeps `uv sync` fast and every dependency here is one we're
-    # actively using. Confirmed real PyPI package name: "google-adk".
+    # Layer 3 — CRAG orchestration (see ADR 0004: ADK for orchestration,
+    # LangChain for components). Confirmed real package + current stable
+    # interface (Agent, tools=[...], output_schema) against the official
+    # google/adk-python repo, latest release v1.33.0, before installing —
+    # ADK 2.0 shipped real breaking changes to the agent/event/session
+    # API, so version awareness matters here more than for most deps.
+    "google-adk>=1.30.0",
 
     # GCP — all used from day one
     "google-cloud-aiplatform>=1.55.0",   # Vertex AI: Gemini + embeddings + Ranking API (Layer 2 rerank)
