@@ -58,6 +58,15 @@ dependencies = [
     # API, so version awareness matters here more than for most deps.
     "google-adk>=1.30.0",
 
+    # Layer 6 — GraphRAG (see ADR 0010). Neo4j AuraDB Free — a deliberate
+    # break from every earlier "reuse the existing Postgres" decision
+    # (ADR 0003, ADR 0005), chosen specifically to demonstrate real
+    # graph-database/Cypher experience rather than modeling relationships
+    # as plain SQL tables. AuraDB Free tier is genuinely free (no credit
+    # card), up to 200k nodes / 400k relationships — far beyond what a
+    # ~388-chunk corpus's concept graph will ever need.
+    "neo4j>=5.24.0",
+
     # GCP — all used from day one
     "google-cloud-aiplatform>=1.55.0",   # Vertex AI: Gemini + embeddings + Ranking API (Layer 2 rerank)
     "google-cloud-storage>=2.16.0",       # raw PDFs + processed chunk JSONL

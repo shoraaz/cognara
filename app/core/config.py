@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     CLOUD_SQL_INSTANCE: str = ""                # "project:region:instance" — used by the Connector
     EMBEDDING_DIM: int = 768                    # text-embedding-004 output dimension
 
+    # ── Graph store: Neo4j AuraDB Free (see ADR 0010, Layer 6 GraphRAG) ───
+    # A deliberate exception to "reuse Cloud SQL" (unlike pgvector/BM25) —
+    # see ADR 0010 for why. AuraDB Free is genuinely free, no credit card;
+    # blank defaults here mean the app still starts fine before the
+    # instance/credentials exist — Layer 6 code checks for presence itself
+    # rather than making these required app-wide.
+    NEO4J_URI: str = ""                         # e.g. "neo4j+s://xxxxxxxx.databases.neo4j.io"
+    NEO4J_USERNAME: str = "neo4j"
+    NEO4J_PASSWORD: str = ""                    # local: .env  |  prod: Secret Manager
+
     # ── Retrieval ─────────────────────────────
     RETRIEVAL_TOP_K: int = 5
     RETRIEVAL_SCORE_THRESHOLD: float = 0.35     # used by hybrid_search/vector_store k defaults
