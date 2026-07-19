@@ -82,9 +82,15 @@ class Settings(BaseSettings):
     # blank defaults here mean the app still starts fine before the
     # instance/credentials exist — Layer 6 code checks for presence itself
     # rather than making these required app-wide.
+    # NOTE: AuraDB's own generated .env download revealed the real username
+    # is the INSTANCE ID itself, not the literal string "neo4j" — an
+    # incorrect assumption in the very first version of this field that
+    # caused two real authentication failures before being corrected.
+    # See BUG_FIX_LOG.md "Config: Neo4j AuraDB username is not literally 'neo4j'".
     NEO4J_URI: str = ""                         # e.g. "neo4j+s://xxxxxxxx.databases.neo4j.io"
-    NEO4J_USERNAME: str = "neo4j"
+    NEO4J_USERNAME: str = ""                    # AuraDB: this is the instance ID, not "neo4j"
     NEO4J_PASSWORD: str = ""                    # local: .env  |  prod: Secret Manager
+    NEO4J_DATABASE: str = ""                    # AuraDB: also the instance ID for Free tier
 
     # ── Retrieval ─────────────────────────────
     RETRIEVAL_TOP_K: int = 5
