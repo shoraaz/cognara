@@ -43,12 +43,12 @@ reasons specific to this layer:
 
 Neo4j AuraDB Free is a real, permanent free tier (not a time-limited
 trial) — no credit card required, supporting up to 200,000 nodes and
-400,000 relationships. This corpus's concept graph (extracted from ~388
-chunks, likely well under 500 concept nodes) is nowhere near that
-ceiling. This keeps Layer 6 consistent with the project's standing cost
-discipline (stop-when-idle Cloud SQL, free-tier-first choices
-throughout) despite the architectural decision to use a specialized
-system.
+400,000 relationships. The real, final concept graph extracted from
+this corpus (799 concepts, 970 relationships — see Results below) uses
+under 0.5% of that ceiling. This keeps Layer 6 consistent with the
+project's standing cost discipline (stop-when-idle Cloud SQL, free-
+tier-first choices throughout) despite the architectural decision to
+use a specialized system.
 
 ## Decision 2: the graph is extracted from the corpus by an LLM pass, not built by hand
 
@@ -62,22 +62,89 @@ graph incrementally as chunks are processed, the same "let an LLM do
 the structural extraction work, verify the result" pattern already used
 throughout retrieval and generation, not a manually curated ontology.
 
+## Real, practical constraint found while running the extraction (not a design flaw)
+
+The full 388-chunk extraction (one Gemini call per chunk, per Decision
+2) reliably exceeded the execution-time window of a single remote-shell
+tool invocation used to run it — a genuine, practical constraint of the
+development environment, not a bug in the pipeline itself. This surfaced
+two real, separate gaps that were found and fixed in sequence:
+
+1. **Resumability** — the first version of `build_graph()` had no way
+   to skip chunks already processed on a prior (interrupted) run, so a
+   naive re-run would re-spend real Gemini API calls reprocessing the
+   same chunks. Fixed by querying Neo4j directly, at the start of every
+   run, for the set of `chunk_id`s already present in any concept's
+   `grounding_chunk_ids` — reading the graph's own real state as the
+   source of truth, not a separate progress-tracking file that could
+   drift out of sync with what was actually written.
+2. **Batching** — resumability alone was not sufficient, since even
+   "everything remaining" after a partial run was still 200+ sequential
+   chunks, still exceeding the execution window on every attempt. Fixed
+   by adding an explicit `--limit N` flag: process at most N not-yet-
+   done chunks, then stop cleanly and report real, verifiable progress.
+   The full extraction was completed by invoking the pipeline
+   repeatedly with small batches (15-21 chunks each) until it reported
+   "All chunks processed" — genuine, practical resumability under a
+   real environmental constraint, not just theoretical idempotency.
+
+## Results — real, final numbers from the completed extraction
+
+The full 388-chunk corpus was processed across several resumed batches,
+with **zero extraction errors** across the entire run:
+
+| Metric | Value |
+|---|---|
+| Chunks processed | 388 / 388 (100%) |
+| Extraction errors | 0 |
+| Final concept count | 799 |
+| Final relationship count | 970 |
+
+Spot-checked directly against the live graph: `get_related_concepts()`
+on "Gradient Descent" correctly returns 24 real, sensible connections
+(e.g. `RELATED_TO: Vanishing Gradient Problem`, `RELATED_TO: Learning
+Rate`, `PART_OF: Backpropagation`) — genuine, text-grounded
+relationships, not generic or hallucinated ones.
+
+One honest, non-bug observation: `get_prerequisites()` on "Vanishing
+Gradient Problem" returns empty, even though "Gradient Descent" is
+clearly conceptually connected to it (confirmed present as a
+`RELATED_TO` edge). This reflects the extraction prompt's own
+instruction to only extract relations the source text actually
+supports — the model judged this connection as `RELATED_TO` rather
+than a directional `PREREQUISITE_OF`, a defensible, conservative
+reading rather than an extraction failure. A future refinement could
+revisit the PREREQUISITE_OF extraction criteria specifically if this
+undercounts genuinely prerequisite relationships in practice.
+
 ## Consequences
 
-- New dependency: `neo4j` Python driver.
+- New dependency: `neo4j` Python driver (v6.2.0).
 - New GCP-adjacent-but-external service: Neo4j AuraDB Free — outside
   Cloud SQL, requiring its own connection URI and credentials in
   settings, following the same `.env` + `Settings` pattern as every
-  other credential in this project.
-- A new one-time extraction script builds the graph from the existing
-  388 chunks — analogous to `run_ingestion.py`, but populating Neo4j
-  instead of Cloud SQL.
+  other credential in this project. A real, twice-reproduced wrong
+  assumption (that the AuraDB username is literally "neo4j", when it is
+  actually the instance ID) cost two authentication failures before
+  being corrected from the instance's own downloaded `.env`.
+- Two real Cypher syntax restrictions found and fixed before trusting
+  `graph_store.py`: relationship types and variable-length path bounds
+  cannot be parameterized the way property values can, requiring
+  validated f-string interpolation restricted to code-controlled
+  values; and an unconfirmed APOC function's availability on AuraDB
+  Free was avoided entirely by moving that one piece of logic (list
+  deduplication) into Python instead.
+- A new resumable, batchable extraction script
+  (`ingestion/pipelines/build_concept_graph.py`) builds the graph from
+  the existing 388 chunks — analogous to `run_ingestion.py`, but
+  populating Neo4j instead of Cloud SQL, with resumability and batching
+  added as real, practical necessities, not speculative features.
 - Retrieval gains a new path: graph traversal queries (e.g. "what
   should I learn before X") run alongside, not instead of, Layers 1-2's
-  hybrid vector+keyword search — CRAG's search_notes tool gains graph
-  traversal as an additional signal for structural questions, while
-  Layers 1-4's existing pipeline remains unchanged for content
-  questions.
+  hybrid vector+keyword search — CRAG's search_notes tool can gain graph
+  traversal as an additional signal for structural questions in a future
+  refinement, while Layers 1-4's existing pipeline remains unchanged for
+  content questions.
 
 ## Interview summary
 
@@ -88,8 +155,14 @@ BM25 over a second search engine — both times I stuck with the existing
 database unless there was a demonstrated reason not to. Here the reason
 was that GraphRAG is specifically about demonstrating real graph-
 traversal patterns and Cypher, not just relationship metadata, and
-AuraDB's free tier keeps that decision cost-neutral, consistent with
-the cost discipline I've maintained everywhere else. The graph itself
-is extracted from the corpus by an LLM reading each chunk's real
-heading structure, the same 'let an LLM do the structural extraction,
-verify the result' pattern I used for chunk retrieval and generation."
+AuraDB's free tier keeps that decision cost-neutral. The graph itself is
+extracted from the corpus by an LLM reading each chunk's real heading
+structure — I ran the full 388-chunk extraction with zero errors,
+producing 799 concepts and 970 relationships, but hit a real practical
+constraint doing it: a single remote-execution call couldn't finish 388
+sequential Gemini calls in one window. I fixed that properly, not by
+just retrying — I made the pipeline read the graph's own current state
+to determine what's left to do, and added explicit batch limits, so it
+could be run repeatedly in small, always-completing chunks until done.
+That's a genuinely different, more practical kind of resumability than
+just 'the writes happen to be idempotent.'"

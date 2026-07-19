@@ -5,7 +5,7 @@
 # in PowerShell (see the PowerShell-equivalent comment under each target).
 # ─────────────────────────────────────────────
 
-.PHONY: install install-dev dev lint fmt test ingest db-proxy db-init db-start db-stop help
+.PHONY: install install-dev dev lint fmt test ingest build-graph db-proxy db-init db-start db-stop help
 
 ## Install all dependencies using uv.
 ## --no-install-project: Cognara Learn is an application, not a published
@@ -83,6 +83,17 @@ db-init:
 ## Usage: make ingest PDF_DIR=data/raw_pdfs
 ingest:
 	uv run --no-sync python -m ingestion.pipelines.run_ingestion --pdf-dir $(PDF_DIR)
+
+## Extract the Layer 6 concept graph from the corpus into Neo4j AuraDB.
+## Resumable — safe to interrupt and re-run; re-reads real graph state to
+## skip already-processed chunks (see ingestion/pipelines/build_concept_graph.py).
+## Real-world note: a full 388-chunk run reliably exceeds a single remote-
+## shell invocation's execution window: run this repeatedly with a small
+## LIMIT (e.g. 15-20) until it reports "All chunks processed."
+## Usage: make build-graph              (attempt everything remaining)
+##        make build-graph LIMIT=20     (process at most 20 more chunks, then stop)
+build-graph:
+	uv run --no-sync python -m ingestion.pipelines.build_concept_graph $(if $(LIMIT),--limit $(LIMIT),)
 
 ## Show this help
 help:
