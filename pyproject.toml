@@ -22,41 +22,29 @@ dependencies = [
     "sqlalchemy>=2.0.0",                  # query building + connection pooling
     "cloud-sql-python-connector[pg8000]>=1.9.0",  # secure Cloud SQL connections (prod)
 
-    # Ingestion + retrieval components (see ADR 0004)
-    # NOTE: as of langchain 1.x, TextSplitter/BaseLoader helpers are split
-    # across independently-versioned packages, not bundled into one. All
-    # were needed — confirmed by actually trying the imports.
-    "langchain>=0.3.0",                   # top-level package
-    "langchain-core>=0.3.0",              # Document, BaseLoader, VectorStore base abstractions
-    "langchain-text-splitters>=0.3.0",    # TextSplitter and concrete splitters (separate package!)
-
-    # Embeddings + generation clients (Vertex AI backend, via Google's
-    # consolidated SDK — see Module 4 build notes):
-    #   - langchain-google-genai's GoogleGenerativeAIEmbeddings replaces
-    #     the now-deprecated VertexAIEmbeddings; same Vertex AI backend
-    #     via project= + vertexai=True, no reported downside for embeddings.
-    #   - langchain-google-vertexai's ChatVertexAI is KEPT (not migrated to
-    #     ChatGoogleGenerativeAI yet) — teams report 50-90% latency
-    #     increases after that specific migration (REST vs gRPC under the
-    #     hood, as of this writing). Revisit when Module 6 (generation)
-    #     is built, once that regression is resolved upstream or measured
-    #     as acceptable for our own latency budget.
-    "langchain-google-genai>=4.0.0",      # GoogleGenerativeAIEmbeddings (Vertex AI backend)
-    "langchain-google-vertexai>=2.0.0",   # ChatVertexAI — kept deliberately, see note above
-    "langchain-postgres>=0.0.12",         # kept only for its Embeddings/VectorStore base re-exports;
-                                           # NOT used for its PGVector class — see app/retrieval/vector_store.py
+    # Ingestion + retrieval components (see ADR 0004 — SUPERSEDED by ADR 0011
+    # for the agent/orchestration layer; LangChain remains here for now,
+    # pending the retrieval-layer phase of the Agno migration).
+    "langchain>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-text-splitters>=0.3.0",
+    "langchain-google-genai>=4.0.0",
+    "langchain-google-vertexai>=2.0.0",
+    "langchain-postgres>=0.0.12",
 
     # Layer 2 — Advanced Retrieval (see ADR 0005)
-    "rank-bm25>=0.2.2",                   # real BM25Okapi keyword search, in-memory index
-    "langchain-google-community[vertexaisearch]>=2.0.0",  # VertexAIRank reranker (Discovery Engine Ranking API)
+    "rank-bm25>=0.2.2",
+    "langchain-google-community[vertexaisearch]>=2.0.0",
 
-    # Layer 3 — CRAG orchestration (see ADR 0004: ADK for orchestration,
-    # LangChain for components). Confirmed real package + current stable
-    # interface (Agent, tools=[...], output_schema) against the official
-    # google/adk-python repo, latest release v1.33.0, before installing —
-    # ADK 2.0 shipped real breaking changes to the agent/event/session
-    # API, so version awareness matters here more than for most deps.
-    "google-adk>=1.30.0",
+    # Layer 3 — CRAG orchestration (see ADR 0011: Agno, replacing ADK — see
+    # ADR 0004/0006 SUPERSEDED). Confirmed real, current API — Agent,
+    # tools=[...], output_schema, RunOutput.tools[].{tool_name,tool_args,result}
+    # — directly against docs.agno.com (Agno Docs MCP) before writing any
+    # code. Real version pin confirmed via PyPI: agno >=2.5.0 (current
+    # stable line as of this migration; v2.0, Sept 2025, was a full rewrite
+    # of Agent/Team/Workflow — pre-v2.0 tutorials/code do not apply).
+    "agno>=2.5.0",
+    "google-genai>=1.0.0",                # underlies agno.models.google.Gemini (Vertex AI backend)
 
     # Layer 6 — GraphRAG (see ADR 0010). Neo4j AuraDB Free — a deliberate
     # break from every earlier "reuse the existing Postgres" decision

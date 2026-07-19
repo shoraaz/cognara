@@ -1,6 +1,13 @@
 # ADR 0006: Layer 3 CRAG — ADK Agent Design, and Three Real Bugs Found Building It
 
-Status: Accepted
+Status: **Superseded by [ADR 0011](0011-crag-migration-adk-to-agno.md)**
+— CRAG was migrated from ADK to Agno on 2026-07-19, as a direct
+architectural decision, not because of any unresolved issue below (all
+three bugs here were found, fixed, and verified working before the
+migration). This document is kept unedited as the real, permanent record
+of that debugging work — it remains genuine, valuable engineering
+history independent of which framework the code currently runs on.
+
 Date: 2026-07-18
 
 ## Context
@@ -141,3 +148,10 @@ that by having the agent compute its own scores and pass them AS
 ARGUMENTS to the tool, which just records them — a clearer contract.
 Each fix taught me something different about the actual, current
 limitations of agent frameworks versus their documentation."
+
+---
+
+**Update, 2026-07-19:** replaced by Agno — see
+[ADR 0011](0011-crag-migration-adk-to-agno.md). All three bugs above
+were real and are now historical; the current code no longer has this
+shape.

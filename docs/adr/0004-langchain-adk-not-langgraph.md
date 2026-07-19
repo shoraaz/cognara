@@ -1,6 +1,12 @@
 # ADR 0004: Ingestion and Orchestration Framework Selection — LangChain + ADK, No LangGraph
 
-Status: Accepted
+Status: **Partially superseded by [ADR 0011](0011-crag-migration-adk-to-agno.md)**
+— the ADK-for-orchestration decision below (Layers 3-9) was replaced by
+Agno on 2026-07-19. The LangChain-for-components decision (ingestion,
+retrieval, Layers 1-2) is NOT superseded and remains accurate. This
+document is kept unedited below as the real, permanent record of the
+original decision and reasoning — see ADR 0011 for what changed and why.
+
 Date: 2026-07-17
 
 ## Context
@@ -122,3 +128,11 @@ more mature ecosystem and better third-party observability — for a
 GCP-committed project where I also wanted the simplest correct mental
 model, ADK's tighter Google Cloud integration was the right trade to
 make."
+
+---
+
+**Update, 2026-07-19:** the ADK-for-orchestration half of this decision
+was replaced by Agno — see [ADR 0011](0011-crag-migration-adk-to-agno.md)
+for the real reasoning and what changed. This was a direct architectural
+decision, not driven by a shortfall in ADK, which was working correctly
+with three confirmed, fixed framework bugs behind it (see ADR 0006).
