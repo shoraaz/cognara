@@ -7,9 +7,9 @@ See ADR 0010 for the full design reasoning.
 WHY THIS FILE EXISTS:
   This is the only place in the codebase that runs Cypher queries — the
   graph-equivalent of vector_store.py (the only place running SQL against
-  Cloud SQL). Concept extraction (graph_extraction.py) writes here; CRAG's
-  search_notes tool (once extended for Layer 6) reads here for structural
-  questions like "what should I learn before X."
+  Cloud SQL). Concept extraction (build_concept_graph.py) writes here;
+  CRAG's search_concept_graph tool (crag_agent.py) reads here for
+  structural questions like "what should I learn before X."
 
 GRAPH MODEL:
   (:Concept {name, description})
@@ -23,12 +23,12 @@ GRAPH MODEL:
   project, applied to graph nodes instead of retrieved text chunks.
 
 WHY MERGE, NOT CREATE, FOR EVERY WRITE:
-  The extraction pipeline (graph_extraction.py) may run multiple times as
-  the corpus grows or extraction logic improves. MERGE is idempotent —
-  verified directly against the live AuraDB instance before building this
-  module: running the same MERGE query twice creates the node/relationship
-  once, and reports zero additional nodes_created/relationships_created on
-  the second run. CREATE would duplicate nodes on every re-run.
+  The extraction pipeline may run multiple times as the corpus grows or
+  extraction logic improves. MERGE is idempotent — verified directly
+  against the live AuraDB instance before building this module: running
+  the same MERGE query twice creates the node/relationship once, and
+  reports zero additional nodes_created/relationships_created on the
+  second run. CREATE would duplicate nodes on every re-run.
 
 TWO REAL CYPHER SYNTAX ISSUES FOUND AND FIXED BEFORE TRUSTING THIS MODULE
 (caught by checking against real AuraDB behaviour/docs, not assumed):
@@ -37,8 +37,7 @@ TWO REAL CYPHER SYNTAX ISSUES FOUND AND FIXED BEFORE TRUSTING THIS MODULE
      only ships a SUBSET of APOC Core, and that specific function's
      presence could not be confirmed with certainty. Rather than risk a
      runtime failure on an unconfirmed procedure, deduplication is done
-     in PYTHON before the query runs (see _dedupe below) — zero external
-     Cypher dependency, and the Cypher itself becomes a plain SET.
+     in PYTHON before the query runs — zero external Cypher dependency.
   2. get_prerequisites()'s first draft tried to parameterize the
      variable-length path range as *1..$max_depth. Cypher does NOT
      support parameterizing path-length bounds the way it supports
@@ -48,18 +47,47 @@ TWO REAL CYPHER SYNTAX ISSUES FOUND AND FIXED BEFORE TRUSTING THIS MODULE
      a real bounded int and inlining it via an f-string, with the same
      "never raw user input" restriction already applied to relation_type.
 
+REAL BUG FOUND AND FIXED — find_concept_by_name()'S FIRST VERSION
+RANKED GENERIC MATCHES ABOVE SPECIFIC ONES:
+  Testing "vanishing gradients" against the real 799-concept graph
+  returned ['Gradients', 'Gradient', 'Vanishing Gradients'] — the
+  correct, specific match ("Vanishing Gradients") ranked LAST, behind
+  two generic, near-useless partial matches. Root cause: plain
+  bidirectional CONTAINS matching has no sense of specificity — a short
+  generic name like "Gradient" trivially satisfies "query CONTAINS
+  name" for almost any gradient-related query, and Cypher's default
+  result order for equally-matching rows is not guaranteed to favour
+  the more specific one.
+  FIX: results are now ordered by DESCENDING concept-name length before
+  the LIMIT is applied — a cheap, real proxy for specificity (a longer,
+  more specific canonical name is a better resolution target than a
+  short, generic one that happens to also match). Verified against the
+  same real query after the fix — see BUG_FIX_LOG.md for the exact
+  before/after output.
+
+LAYER 3 WIRING — find_concept_by_name():
+  CRAG's search_concept_graph tool needs to resolve a user's free-text
+  question (e.g. "what should I learn before understanding vanishing
+  gradients") to a REAL, exact Concept node name (e.g. "Vanishing
+  Gradients") before it can traverse. find_concept_by_name() does this
+  with simple, bidirectional case-insensitive substring matching,
+  ranked by specificity (see bug note above) — deliberately NOT a
+  second embedding-similarity system, since the concept graph is small
+  (799 nodes) and this is a cheap, bounded Cypher query, not a
+  bottleneck worth new infrastructure for.
+
 INTERVIEW EXPLANATION:
   "This is the only module that speaks Cypher, the same way vector_store.py
   is the only module that speaks SQL to Cloud SQL. Every write uses MERGE,
   verified genuinely idempotent against the live database rather than
   assumed. I also hit two real Cypher restrictions while building this:
   relationship types and variable-length path bounds can't be
-  parameterized the way property values can — both had to be inlined via
-  f-strings, restricted to code-controlled, validated values only, never
-  raw user input, to avoid Cypher injection. And rather than trust an
-  unconfirmed APOC function's availability on the free tier, I moved that
-  one piece of logic — deduplicating a list — into Python, where I don't
-  need to guess what's installed."
+  parameterized the way property values can. And when I wired up fuzzy
+  concept-name resolution, a real test against the actual graph showed
+  generic short names like 'Gradient' outranking the specific, correct
+  match 'Vanishing Gradients' — simple CONTAINS matching has no built-in
+  sense of specificity. I fixed it by ranking longer, more specific
+  names first, a cheap proxy that fixed the real case I tested against."
 
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/retrieval/graph_store.py"
 """
@@ -162,6 +190,9 @@ def get_prerequisites(driver: Driver, concept_name: str, max_depth: int = 3) -> 
     restriction already documented on relationship TYPES above).
     Validated as a real, bounded int before inlining — never raw user
     input — to avoid Cypher injection via this path.
+
+    concept_name must be a REAL, exact node name — see
+    find_concept_by_name() below for resolving free-text input first.
     """
     if not isinstance(max_depth, int) or not (1 <= max_depth <= 10):
         raise ValueError(f"max_depth must be an int between 1 and 10, got: {max_depth!r}")
@@ -179,7 +210,8 @@ def get_prerequisites(driver: Driver, concept_name: str, max_depth: int = 3) -> 
 
 
 def get_related_concepts(driver: Driver, concept_name: str) -> list[dict]:
-    """One-hop RELATED_TO / PART_OF / CONTRASTS_WITH neighbors of a concept."""
+    """One-hop RELATED_TO / PART_OF / CONTRASTS_WITH neighbors of a concept.
+    concept_name must be a REAL, exact node name — see find_concept_by_name()."""
     result = driver.execute_query(
         """
         MATCH (c:Concept {name: $name})-[r]-(other:Concept)
@@ -188,6 +220,43 @@ def get_related_concepts(driver: Driver, concept_name: str) -> list[dict]:
                other.grounding_chunk_ids AS chunk_ids, type(r) AS relation
         """,
         name=concept_name, database_=settings.NEO4J_DATABASE,
+    )
+    return [r.data() for r in result.records]
+
+
+def find_concept_by_name(driver: Driver, query_text: str, limit: int = 3) -> list[dict]:
+    """
+    Fuzzy-resolve free text to real Concept node(s) by name — the graph's
+    real, canonical concept names (e.g. "Vanishing Gradients") rarely
+    match a user's exact question phrasing (e.g. "what should I learn
+    before understanding vanishing gradients"). This is the resolution
+    step needed before get_prerequisites()/get_related_concepts() can
+    traverse from a real starting node — see module docstring.
+
+    Uses case-insensitive substring matching in BOTH directions (does the
+    concept name appear in the query, or does the query appear in the
+    concept name), ranked by DESCENDING name length — see module
+    docstring's REAL BUG FOUND AND FIXED for why plain, unranked CONTAINS
+    matching let short, generic names (e.g. "Gradient") outrank the
+    correct, specific match (e.g. "Vanishing Gradients"). Longer name =
+    treated as more specific = ranked first, a cheap, real proxy that
+    fixed the observed failure case.
+
+    Deliberately NOT a second embedding-similarity system — the concept
+    graph is small (799 nodes) and this is a cheap, bounded Cypher
+    query, not a bottleneck worth new infrastructure for.
+    """
+    result = driver.execute_query(
+        """
+        MATCH (c:Concept)
+        WHERE toLower($query_text) CONTAINS toLower(c.name)
+           OR toLower(c.name) CONTAINS toLower($query_text)
+        RETURN c.name AS name, c.description AS description,
+               c.grounding_chunk_ids AS chunk_ids
+        ORDER BY size(c.name) DESC
+        LIMIT $limit
+        """,
+        query_text=query_text, limit=limit, database_=settings.NEO4J_DATABASE,
     )
     return [r.data() for r in result.records]
 

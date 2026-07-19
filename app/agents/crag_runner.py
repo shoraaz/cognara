@@ -26,10 +26,29 @@ KEY DESIGN DECISIONS (full bug stories in local-notes/BUG_FIX_LOG.md):
   - reset_grade_call_count() is called at the start of every run so each
     question gets a fresh 2-call grading budget (Round 2 fix).
   - Evidence chunks are extracted directly from ADK's event stream via
-    event.get_function_responses(), tracking the MOST RECENT search_notes
+    event.get_function_responses(), tracking the MOST RECENT retrieval-tool
     result (Round 5 fix). On a retry path, the SECOND search's results are
     what the final grade was based on — a separate re-fetch could silently
     return different results.
+
+REAL BUG FOUND AND FIXED (Layer 6 wiring) — EVIDENCE EXTRACTION ONLY
+WATCHED search_notes, NOT search_concept_graph:
+  Adding search_concept_graph as a second retrieval tool (crag_agent.py)
+  surfaced a real gap immediately: a real structural question ("What
+  concepts relate to vanishing gradients?") correctly made the agent
+  choose search_concept_graph, correctly resolved the concept, correctly
+  graded the result (relevance_score=0.9, decision=use) — but
+  evidence_chunk_count came back as 0. The evidence-extraction loop below
+  only ever checked `resp.name == "search_notes"`, so a real, successful
+  search_concept_graph call's results were silently ignored — grading
+  happened on real evidence the agent could see, but run_crag()'s caller
+  (ask_service.py) would have received zero citations for a "use"
+  decision, an inconsistent, broken state.
+  FIX: the evidence-extraction check now accepts EITHER tool name
+  (search_notes OR search_concept_graph) — both already return the
+  identical dict shape (see crag_agent.py's search_concept_graph
+  docstring for why that shape-matching was deliberate), so no other
+  code needed to change once this check was widened.
 
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/agents/crag_runner.py"
 """
@@ -54,6 +73,11 @@ APP_NAME = "cognara_crag"
 # e.g. ```json\n{...}\n``` or ```\n{...}\n```.
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
+# Both retrieval tools return the identical evidence-chunk dict shape (see
+# crag_agent.py's search_concept_graph docstring) — either one's result is
+# valid "current evidence" for the evidence-extraction loop below.
+_RETRIEVAL_TOOL_NAMES = {"search_notes", "search_concept_graph"}
+
 
 async def run_crag(question: str, course_filter: str | None = None) -> dict:
     """
@@ -71,9 +95,10 @@ async def run_crag(question: str, course_filter: str | None = None) -> dict:
         A dict with:
           - grade: RetrievalGrade shape (relevance_score, completeness_score,
             decision, reason, rewritten_query)
-          - evidence_chunks: list of chunk dicts from the LAST search_notes
-            call the agent made — the exact evidence the final grade was
-            based on. See BUG_FIX_LOG.md "CRAG Runner Round 5".
+          - evidence_chunks: list of chunk dicts from the LAST retrieval-tool
+            call the agent made (search_notes OR search_concept_graph — see
+            module docstring's REAL BUG FOUND AND FIXED) — the exact evidence
+            the final grade was based on. See BUG_FIX_LOG.md "CRAG Runner Round 5".
     """
     # Give this question a clean 2-call grading budget — see crag_agent.py's
     # _grade_call_count and BUG_FIX_LOG.md "CRAG Agent Round 2".
@@ -106,8 +131,9 @@ async def run_crag(question: str, course_filter: str | None = None) -> dict:
 
     final_response_text = None
     tool_call_count = 0
-    # Tracks the most recent search_notes result — updated on every search_notes
-    # response so on a retry path we end up with the SECOND (final) search's chunks.
+    # Tracks the most recent retrieval-tool result — updated on every
+    # search_notes/search_concept_graph response so on a retry path we end
+    # up with the SECOND (final) search's chunks, whichever tool made it.
     latest_evidence_chunks: list[dict] = []
 
     async for event in runner.run_async(user_id=user_id, session_id=session_id, new_message=content):
@@ -116,16 +142,18 @@ async def run_crag(question: str, course_filter: str | None = None) -> dict:
         if function_calls:
             tool_call_count += len(function_calls)
 
-        # Extract evidence chunks from search_notes responses.
-        # ADK wraps non-dict tool returns under a "result" key — search_notes
-        # returns a list, so handle both shapes defensively.
+        # Extract evidence chunks from EITHER retrieval tool's response — see
+        # module docstring's REAL BUG FOUND AND FIXED for why both must be
+        # checked, not just search_notes. ADK wraps non-dict tool returns
+        # under a "result" key — both tools return a list, so handle both
+        # shapes defensively.
         function_responses = event.get_function_responses() if getattr(event, "get_function_responses", None) else None
         if function_responses:
             for resp in function_responses:
-                if resp.name == "search_notes" and isinstance(resp.response, dict):
+                if resp.name in _RETRIEVAL_TOOL_NAMES and isinstance(resp.response, dict):
                     raw = resp.response.get("result", resp.response)
                     if isinstance(raw, list):
-                        # Overwrite on every search_notes call so we always
+                        # Overwrite on every retrieval-tool call so we always
                         # hold the LATEST (most recently graded) result set.
                         latest_evidence_chunks = raw
 

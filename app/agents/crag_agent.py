@@ -1,7 +1,7 @@
 """
 app/agents/crag_agent.py
 ------------------------
-Layer 3: Corrective RAG (CRAG), implemented as an ADK Agent with three tools.
+Layer 3: Corrective RAG (CRAG), implemented as an ADK Agent with FOUR tools.
 Per ADR 0004's decision that orchestration (Layer 3 onward) uses ADK.
 
 WHY AN AGENT INSTEAD OF HAND-CODED if/else RETRY LOGIC:
@@ -16,18 +16,29 @@ WHY AN AGENT INSTEAD OF HAND-CODED if/else RETRY LOGIC:
   — are genuinely better made by an LLM reasoning about the specific evidence
   in front of it than by a fixed numeric threshold alone.
 
-THE THREE TOOLS:
+THE FOUR TOOLS:
   1. search_notes(query, course_filter, chapter_filter)
      Wraps Layer 2's full pipeline (hybrid_search -> rerank) unchanged.
      CRAG adds judgment on top of retrieval, it does not reimplement it.
+     Use for CONTENT questions: "explain X", "what is Y".
 
-  2. grade_retrieval(relevance_score, completeness_score, decision, reason,
+  2. search_concept_graph(query, relation, max_depth) — Layer 6 wiring.
+     Wraps graph_store.py's traversal functions. Use for STRUCTURAL
+     questions: "what should I learn before X", "what relates to Y".
+     Resolves free text to a real graph node (graph_store.find_concept_by_name),
+     traverses, then fetches the REAL chunk text for every grounding_chunk_id
+     so results come back in the exact same shape as search_notes — the
+     agent (and everything downstream: grading, generation, faithfulness)
+     never needs to know whether evidence came from vector/keyword search
+     or graph traversal.
+
+  3. grade_retrieval(relevance_score, completeness_score, decision, reason,
      rewritten_query) — "agent computes, tool records" pattern. The agent
      reads the evidence, forms its own judgment, then calls this to record it.
      See BUG_FIX_LOG.md "CRAG Agent Round 3" for why the original signature
      (which had the tool grade) was wrong.
 
-  3. rewrite_query(rewritten_query, reason) — same "agent computes, tool
+  4. rewrite_query(rewritten_query, reason) — same "agent computes, tool
      records" pattern. The agent composes the improved query text, then calls
      this to record it. See BUG_FIX_LOG.md "CRAG Agent Round 4".
 
@@ -41,6 +52,10 @@ KEY DESIGN DECISIONS (full bug stories in local-notes/BUG_FIX_LOG.md):
     12x tool-call loop — a confirmed ADK framework issue).
   - _grade_call_count provides a hard code-level cap at 2 grading calls per
     run (Round 2 bug: instruction alone wasn't reliable enough).
+  - search_concept_graph converts graph results to the SAME dict shape as
+    search_notes specifically so grade_retrieval/generation/faithfulness
+    need zero special-casing for graph-sourced evidence — one pipeline,
+    two retrieval strategies feeding it.
 
 # Interview notes: local-notes/INTERVIEW_PREP.md — "app/agents/crag_agent.py"
 """
@@ -49,14 +64,17 @@ from typing import Literal
 
 from google.adk.agents import Agent
 from pydantic import BaseModel, Field
+import sqlalchemy
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.retrieval import graph_store
 from app.retrieval.embedder import get_embeddings
 from app.retrieval.hybrid_search import hybrid_search
 from app.retrieval.keyword_search import BM25KeywordIndex
 from app.retrieval.reranker import rerank
 from app.retrieval.vector_store import CognaraPGVectorStore
+from ingestion.pipelines.init_db import get_engine
 
 logger = get_logger(__name__)
 
@@ -126,6 +144,24 @@ def _get_keyword_index() -> BM25KeywordIndex:
     return _keyword_index
 
 
+def _fetch_chunks_by_ids(chunk_ids: list[str]) -> dict[str, dict]:
+    """
+    Fetch real chunk rows from Cloud SQL for a list of chunk_ids — used
+    to turn graph traversal results (which only carry grounding_chunk_ids)
+    into the same full evidence-chunk shape search_notes already returns.
+    Returns a dict keyed by chunk_id for easy lookup.
+    """
+    if not chunk_ids:
+        return {}
+    engine = get_engine(ip_type="PUBLIC")
+    with engine.connect() as conn:
+        rows = conn.execute(sqlalchemy.text(
+            "SELECT chunk_id, text, course_name, chapter, topic, page_number, page_range "
+            "FROM chunks WHERE chunk_id = ANY(:ids);"
+        ), {"ids": chunk_ids}).mappings().fetchall()
+    return {r["chunk_id"]: dict(r) for r in rows}
+
+
 # ── Tool implementations ──────────────────────────────────────────────────────
 # Plain functions — ADK reads their docstrings and type hints automatically to
 # build the tool schema presented to the model.
@@ -141,6 +177,12 @@ def search_notes(
     (vector similarity + BM25 keyword search, fused with Reciprocal
     Rank Fusion) followed by precision reranking with the Vertex AI
     Ranking API. Returns the top 5 most relevant evidence chunks.
+
+    Use this for CONTENT questions — "explain X", "what is Y", "how does
+    Z work". For STRUCTURAL questions about how concepts relate to each
+    other — "what should I learn before X", "what concepts relate to Y"
+    — use search_concept_graph instead, which is a better fit for that
+    question shape.
 
     Args:
         query: The question or topic to search for.
@@ -187,6 +229,91 @@ def search_notes(
     ]
 
 
+def search_concept_graph(
+    query: str,
+    relation: Literal["prerequisites", "related"] = "related",
+    max_depth: int = 2,
+) -> list[dict]:
+    """Search the concept graph for STRUCTURAL relationships between topics.
+
+    Use this for questions about how concepts relate to each other, NOT
+    for questions asking to explain a single concept's content — use
+    search_notes for that instead. Good fits for this tool:
+      - "What should I learn before understanding X?" -> relation="prerequisites"
+      - "What concepts relate to X?" -> relation="related"
+
+    Resolves `query` to the closest matching concept in the graph (a
+    799-node graph extracted from the corpus), then traverses from
+    there. Real corpus evidence (chunk text) is fetched for every
+    result, so this returns the SAME shape as search_notes — grade
+    it the exact same way.
+
+    Args:
+        query: The concept to look up — can be phrased naturally, it
+            does not need to exactly match a canonical concept name.
+        relation: "prerequisites" (what to learn BEFORE this concept,
+            via PREREQUISITE_OF edges) or "related" (one-hop RELATED_TO/
+            PART_OF/CONTRASTS_WITH neighbors). Default "related".
+        max_depth: For relation="prerequisites" only — how many hops of
+            prerequisite chains to follow (1-10). Default 2.
+
+    Returns:
+        A list of evidence chunks in the SAME shape as search_notes:
+        text, course_name, chapter, topic, page_number, page_range,
+        relevance_score. Empty list if no matching concept was found in
+        the graph at all — in that case, prefer search_notes instead.
+    """
+    driver = graph_store.get_driver()
+    try:
+        matches = graph_store.find_concept_by_name(driver, query, limit=1)
+        if not matches:
+            logger.info("crag_search_concept_graph_no_match", query=query)
+            return []
+
+        resolved_name = matches[0]["name"]
+
+        if relation == "prerequisites":
+            depth = max(1, min(max_depth, 10))
+            concept_results = graph_store.get_prerequisites(driver, resolved_name, max_depth=depth)
+        else:
+            concept_results = graph_store.get_related_concepts(driver, resolved_name)
+
+        logger.info(
+            "crag_search_concept_graph",
+            query=query, resolved_name=resolved_name,
+            relation=relation, concept_count=len(concept_results),
+        )
+
+        # Collect every grounding chunk_id across all matched concepts, then
+        # fetch the real chunk text ONCE for the whole batch (not per concept).
+        all_chunk_ids = []
+        for c in concept_results:
+            all_chunk_ids.extend(c.get("chunk_ids") or [])
+        chunk_lookup = _fetch_chunks_by_ids(list(dict.fromkeys(all_chunk_ids)))
+
+        evidence = []
+        for c in concept_results:
+            for chunk_id in (c.get("chunk_ids") or []):
+                chunk = chunk_lookup.get(chunk_id)
+                if chunk is None:
+                    continue  # a grounding_chunk_id with no matching row — skip, don't crash
+                evidence.append({
+                    "text":            chunk["text"],
+                    "course_name":     chunk["course_name"],
+                    "chapter":         chunk["chapter"],
+                    "topic":           chunk["topic"],
+                    "page_number":     chunk["page_number"],
+                    "page_range":      chunk["page_range"],
+                    # Graph evidence has no reranker score; 1.0 signals "graph-confirmed
+                    # relationship", distinct from a vector/BM25 similarity score.
+                    "relevance_score": 1.0,
+                })
+
+        return evidence
+    finally:
+        driver.close()
+
+
 def grade_retrieval(
     relevance_score: float,
     completeness_score: float,
@@ -198,10 +325,11 @@ def grade_retrieval(
 
     Call this AFTER you have read the evidence and formed your own
     judgment — YOU compute relevance_score, completeness_score, decision,
-    and reason by reasoning over the evidence search_notes returned; this
-    tool does not grade anything itself, it only records and validates
-    the judgment you already made. Call this AT MOST TWICE PER QUESTION
-    (once per retrieval attempt) — never more.
+    and reason by reasoning over the evidence search_notes (or
+    search_concept_graph) returned; this tool does not grade anything
+    itself, it only records and validates the judgment you already made.
+    Call this AT MOST TWICE PER QUESTION (once per retrieval attempt) —
+    never more.
 
     Args:
         relevance_score: Your own assessment, 0-1, of how relevant the
@@ -290,8 +418,15 @@ def rewrite_query(rewritten_query: str, reason: str) -> dict:
 
 CRAG_INSTRUCTION = """You are Cognara Learn's retrieval quality critic, implementing Corrective RAG.
 
+You have TWO retrieval tools:
+- search_notes(query): for CONTENT questions — "explain X", "what is Y", "how does Z work".
+- search_concept_graph(query, relation): for STRUCTURAL questions about relationships between
+  concepts — "what should I learn before X" (relation="prerequisites"), "what relates to X"
+  (relation="related"). Choose based on what the question is actually asking. If unsure, or if
+  search_concept_graph returns an empty list, fall back to search_notes.
+
 Your job for every question:
-1. Call search_notes(query) to retrieve evidence.
+1. Call the retrieval tool that best fits the question shape (see above) to retrieve evidence.
 2. READ the evidence text carefully. Form your OWN judgment of its
    relevance_score (0-1), completeness_score (0-1), decision
    ("use"/"retry"/"abstain"), and a short reason — based on how well the
@@ -304,9 +439,9 @@ Your job for every question:
 4. If your decision was "retry": compose your OWN improved query text
    (expand vague terms, add ML/DL synonyms, clarify ambiguity), then
    call rewrite_query(rewritten_query, reason) ONCE to record it. Then
-   call search_notes() again with THAT SAME rewritten_query text. Then
-   read the new evidence and call grade_retrieval() ONE more time (your
-   second and FINAL call) with your updated judgment.
+   call your chosen retrieval tool again with THAT SAME rewritten_query
+   text. Then read the new evidence and call grade_retrieval() ONE more
+   time (your second and FINAL call) with your updated judgment.
 5. Once you have your final grading result, respond with ONLY a single
    JSON object, no other text, matching exactly this shape:
    {"relevance_score": <float 0-1>, "completeness_score": <float 0-1>,
@@ -336,10 +471,11 @@ def build_crag_agent() -> Agent:
         name="crag_critic",
         model=CRAG_AGENT_MODEL,
         description=(
-            "Corrective RAG critic: retrieves evidence, grades its quality, "
-            "and retries with a rewritten query once if needed before deciding "
-            "to answer or abstain."
+            "Corrective RAG critic: retrieves evidence (content search or "
+            "concept-graph traversal, whichever fits the question), grades "
+            "its quality, and retries with a rewritten query once if needed "
+            "before deciding to answer or abstain."
         ),
         instruction=CRAG_INSTRUCTION,
-        tools=[search_notes, grade_retrieval, rewrite_query],
+        tools=[search_notes, search_concept_graph, grade_retrieval, rewrite_query],
     )

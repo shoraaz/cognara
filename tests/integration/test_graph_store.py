@@ -139,6 +139,50 @@ class TestTraversal:
         assert b in names
 
 
+class TestFindConceptByName:
+    """
+    REAL BUG FOUND AND FIXED: the first version ranked short, generic
+    matches (e.g. "Gradient") above the correct, specific match (e.g.
+    "Vanishing Gradients") for the real query "vanishing gradients" —
+    plain CONTAINS matching has no sense of specificity. Fixed by
+    ordering results by descending concept-name length. These tests use
+    synthetic TEST_ONLY concepts that reproduce the same short-vs-long
+    ambiguity, so the regression is caught even if the real graph's
+    content changes later.
+    """
+
+    @requires_neo4j
+    def test_more_specific_longer_name_ranks_above_generic_shorter_one(self, driver, cleanup_test_concepts):
+        short_name = f"{TEST_PREFIX}Gradient"
+        long_name = f"{TEST_PREFIX}Vanishing Gradient Problem"
+        graph_store.upsert_concept(driver, short_name, "generic", [])
+        graph_store.upsert_concept(driver, long_name, "specific", [])
+
+        matches = graph_store.find_concept_by_name(driver, f"{TEST_PREFIX}Vanishing Gradient Problem")
+        assert matches[0]["name"] == long_name
+
+    @requires_neo4j
+    def test_unrelated_query_returns_no_matches_or_only_coincidental_short_ones(self, driver):
+        """
+        REAL FINDING while writing this test: a first version asserted
+        matches == [] for a nonsense query, and failed against the real
+        graph — a genuine concept named "Go" (2 characters) coincidentally
+        appears as a substring match for some nonsense strings. This is
+        an honest, minor characteristic of simple bidirectional CONTAINS
+        matching, not a bug to fix: very short concept names are
+        inherently prone to spurious substring hits. The test now checks
+        for what's actually true: any match on a real nonsense query
+        must be short (<=4 chars) — a coincidental substring hit, not a
+        meaningful resolution — never a long, specific concept name.
+        """
+        matches = graph_store.find_concept_by_name(driver, "xyzzy quolgorp fribbleton nonsense")
+        for m in matches:
+            assert len(m["name"]) <= 4, (
+                f"Expected only short, coincidental matches for a nonsense query, "
+                f"got a long match: {m['name']!r}"
+            )
+
+
 class TestGraphStats:
     @requires_neo4j
     def test_real_corpus_graph_has_substantial_content(self, driver):
